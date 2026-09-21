@@ -133,4 +133,5 @@ E:\soft\sbcl\sbcl.exe --eval "(require :asdf)" --eval "(push (truename \".\") as
 
 ## License
 
-MIT
+[GPL-3.0](LICENSE) — GNU General Public License v3.0.
+

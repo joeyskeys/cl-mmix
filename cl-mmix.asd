@@ -2,7 +2,7 @@
 (defsystem "cl-mmix"
   :description "MMIX virtual machine (subset) for SBCL"
   :author "cl-mmix"
-  :license "MIT"
+  :license "GPL-3.0"
   :version "0.1.0"
   :depends-on ()
   :serial t
@@ -25,3 +25,4 @@
                 :components
                 ((:file "tests"))))
   :perform (test-op (o c) (symbol-call :cl-mmix/tests :run-tests)))
+

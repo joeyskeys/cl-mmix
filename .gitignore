@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 *.FASL
 *.fasl
 *.lisp-temp
@@ -15,3 +16,25 @@
 *.sx32fsl
 *.wx64fsl
 *.wx32fsl
+=======
+*.fasl
+*.FASL
+*.dx64fsl
+*.lx64fasl
+*.abcl
+*.x86f
+*.sse2f
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*~
+.#*
+#*
+*.swp
+.DS_Store
+system-index.txt
+.qlot/
+quicklisp/
+>>>>>>> 4ec5fcf (Initial commit: MMIX virtual machine in Common Lisp (SBCL).)

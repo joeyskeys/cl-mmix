@@ -1,6 +1,6 @@
-<<<<<<< HEAD
-*.FASL
+# Common Lisp fasls / images
 *.fasl
+*.FASL
 *.lisp-temp
 *.dfsl
 *.pfsl
@@ -8,6 +8,7 @@
 *.p64fsl
 *.lx64fsl
 *.lx32fsl
+*.lx64fasl
 *.dx64fsl
 *.dx32fsl
 *.fx64fsl
@@ -16,25 +17,25 @@
 *.sx32fsl
 *.wx64fsl
 *.wx32fsl
-=======
-*.fasl
-*.FASL
-*.dx64fsl
-*.lx64fasl
 *.abcl
 *.x86f
 *.sse2f
+
+# Native / FFI
 *.o
 *.a
 *.so
 *.dylib
 *.dll
+
+# Editors / OS
 *~
 .#*
 #*
 *.swp
 .DS_Store
+
+# ASDF / Quicklisp
 system-index.txt
 .qlot/
 quicklisp/
->>>>>>> 4ec5fcf (Initial commit: MMIX virtual machine in Common Lisp (SBCL).)

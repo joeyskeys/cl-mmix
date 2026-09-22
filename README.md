@@ -123,6 +123,8 @@ E:\soft\sbcl\sbcl.exe --eval "(require :asdf)" --eval "(push (truename \".\") as
 
 ## Limitations vs full MMIX
 
+A prioritized comparison with Knuth’s MMIX and with what TAOCP practice needs is in [docs/TAOCP-GAP-ANALYSIS.md](docs/TAOCP-GAP-ANALYSIS.md). Short version:
+
 - Only a coherent **subset** of opcodes (see `src/decode.lisp`)
 - No floating-point, no `PUSHJ`/`POP` stack frame model, no trips/interrupts
 - Special registers mostly stubs; `rR` (DIV remainder) and `rJ` (GO) are used

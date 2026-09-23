@@ -1,20 +1,44 @@
 (in-package #:cl-mmix)
 
-;;; Tiny s-expression assembler.
+;;; S-expression assembler. Emits the same opcode bytes as mmixal:
+;;; forward and backward branches, JMP/JMPB, GETA/GETAB.
 ;;;
-;;; Program form:
 ;;;   (program
-;;;     (:org #x100)            ; optional origin
+;;;     (:org #x100)
 ;;;     (label :start)
-;;;     (setl $1 #x0A)          ; $n or bare integer register
-;;;     (addi $2 $0 1)
+;;;     (setl $1 10)
 ;;;     (bz $1 :done)
 ;;;     (jmp :start)
 ;;;     (label :done)
-;;;     (trap 0 0 0))
+;;;     (trap 0 0 0)
+;;;     (:org #x2000000000000000)
+;;;     (:zstring "hi"))
 ;;;
-;;; Immediates may be integers or labels (resolved as PC-relative for
-;;; branches/JMP/GETA, absolute address for others when used as data).
+;;; Each :org starts a segment written at that address. The VM's PC is
+;;; the first origin. Registers are $3 or 3. Branch, JMP, GETA, and PUSHJ
+;;; targets are labels; the forward or backward opcode is chosen from the
+;;; sign of the displacement.
+
+(defparameter +branch-forward+
+  '((:bn . #x40) (:bnb . #x40)
+    (:bz . #x42) (:bzb . #x42)
+    (:bp . #x44) (:bpb . #x44)
+    (:bod . #x46) (:bodb . #x46)
+    (:bnn . #x48) (:bnnb . #x48)
+    (:bnz . #x4A) (:bnzb . #x4A)
+    (:bnp . #x4C) (:bnpb . #x4C)
+    (:bev . #x4E) (:bevb . #x4E)
+    (:pbn . #x50) (:pbnb . #x50)
+    (:pbz . #x52) (:pbzb . #x52)
+    (:pbp . #x54) (:pbpb . #x54)
+    (:pbod . #x56) (:pbodb . #x56)
+    (:pbnn . #x58) (:pbnnb . #x58)
+    (:pbnz . #x5A) (:pbnzb . #x5A)
+    (:pbnp . #x5C) (:pbnpb . #x5C)
+    (:pbev . #x5E) (:pbevb . #x5E)
+    (:pushj . #xF2) (:pushjb . #xF2)
+    (:geta . #xF4) (:getab . #xF4))
+  "Keyword → even opcode. The backward form is that opcode plus one.")
 
 (defun parse-reg (r)
   (cond
@@ -23,152 +47,291 @@
      r)
     ((and (symbolp r)
           (let ((n (symbol-name r)))
-            (and (char= (char n 0) #\$)
+            (and (plusp (length n))
+                 (char= (char n 0) #\$)
                  (every #'digit-char-p (subseq n 1)))))
      (parse-integer (subseq (symbol-name r) 1)))
     (t (error "Bad register: ~S" r))))
 
-(defun wyde-op-p (op)
-  (member (op-name-key op)
-          '(:seth :setmh :setml :setl :inch :incmh :incml :incl
-            :orh :ormh :orml :orl :geta) :test #'eq))
+(defun parse-special (s)
+  (cond
+    ((integerp s)
+     (unless (<= 0 s 31) (error "Special register out of range: ~S" s))
+     s)
+    ((symbolp s)
+     (let* ((n (string-upcase (symbol-name s)))
+            (n (if (and (> (length n) 1) (char= (char n 0) #\R))
+                   (subseq n 1)
+                   n)))
+       (or (loop for i below 32
+                 when (string= n (aref +special-names+ i))
+                   return i)
+           (error "Unknown special register: ~S" s))))
+    (t (error "Bad special register: ~S" s))))
 
-(defun branch-op-p (op)
-  (member (op-name-key op)
-          '(:bn :bnz :bz :bnn :bp :bnp :bod :bev
-            :pbn :pbnz :pbz :pbnn :pbp :pbnp) :test #'eq))
+(defun form-key (name)
+  (op-name-key name))
+
+(defun string-byte-list (s null-terminate)
+  (let ((bytes (map 'list #'char-code s)))
+    (dolist (b bytes)
+      (unless (<= 0 b 255)
+        (error "String byte does not fit in 8 bits: ~S" b)))
+    (if null-terminate (append bytes '(0)) bytes)))
+
+(defun form-nbytes (form)
+  (if (not (consp form))
+      0
+      (case (form-key (first form))
+        ((:org :label) 0)
+        (:byte (length (rest form)))
+        (:wyde (* 2 (length (rest form))))
+        (:tetra (* 4 (length (rest form))))
+        ((:octa :word) (* 8 (length (rest form))))
+        (:string (length (string-byte-list (second form) nil)))
+        (:zstring (length (string-byte-list (second form) t)))
+        (t 4))))
 
 (defun collect-labels (forms origin)
   (let ((labels (make-hash-table :test 'equal))
         (addr origin))
     (dolist (form forms)
       (cond
-        ((and (consp form) (eq (first form) :org))
+        ((and (consp form) (eq (form-key (first form)) :org))
          (setf addr (second form)))
-        ((and (consp form) (string-equal (symbol-name (first form)) "LABEL"))
+        ((and (consp form) (eq (form-key (first form)) :label))
          (setf (gethash (second form) labels) addr))
-        ((and (consp form) (eq (first form) :word))
-         (incf addr 8))
-        ((and (consp form) (eq (first form) :byte))
-         (incf addr (length (rest form))))
-        ((and (consp form) (keywordp (first form)))
-         nil) ; directive
         ((consp form)
-         (incf addr 4))
-        (t nil)))
+         (incf addr (form-nbytes form)))))
     labels))
 
-(defun resolve-imm (imm labels pc &key relative)
+(defun label-delta (labels pc target)
+  (let ((addr (gethash target labels)))
+    (unless addr (error "Undefined label: ~S" target))
+    (let ((diff (- addr pc)))
+      (unless (zerop (mod diff 4))
+        (error "Label ~S is not a multiple of 4 bytes from #x~X" target pc))
+      (truncate diff 4))))
+
+(defun resolve-abs (imm labels)
   (cond
     ((integerp imm) imm)
-    ((or (symbolp imm) (keywordp imm) (stringp imm))
-     (let ((target (gethash imm labels)))
-       (unless target
-         (error "Undefined label: ~S" imm))
-       (if relative
-           (truncate (- target (+ pc 0)) 4) ; relative in instructions from current PC
-           target)))
+    ((or (symbolp imm) (stringp imm))
+     (or (gethash imm labels)
+         (error "Undefined label: ~S" imm)))
     (t (error "Bad immediate: ~S" imm))))
 
+(defun bytes4 (op x y z)
+  (list (u8 op) (u8 x) (u8 y) (u8 z)))
+
+(defun split-field (value bits)
+  (let ((mask (1- (ash 1 bits))))
+    (values (ldb (byte 8 (- bits 8)) (logand value mask))
+            (if (> bits 16)
+                (ldb (byte 8 (- bits 16)) (logand value mask))
+                0)
+            (ldb (byte 8 0) (logand value mask)))))
+
+(defun encode-relative (forward-byte delta bits)
+  (let ((min (- (ash 1 bits)))
+        (max (1- (ash 1 bits))))
+    (unless (<= min delta max)
+      (error "Relative displacement ~D does not fit in ~D bits" delta bits))
+    (if (minusp delta)
+        (values (1+ forward-byte) (logand (+ delta (ash 1 bits)) (1- (ash 1 bits))))
+        (values forward-byte delta))))
+
+(defun emit-data-bytes (form)
+  (case (form-key (first form))
+    (:byte (mapcar #'u8 (rest form)))
+    (:wyde
+     (loop for w in (rest form)
+           for v = (u16 w)
+           append (list (ldb (byte 8 8) v) (ldb (byte 8 0) v))))
+    (:tetra
+     (loop for w in (rest form)
+           for v = (u32 w)
+           append (list (ldb (byte 8 24) v) (ldb (byte 8 16) v)
+                        (ldb (byte 8 8) v) (ldb (byte 8 0) v))))
+    ((:octa :word)
+     (loop for w in (rest form)
+           nconc (let ((v (u64 w)))
+                   (loop for shift from 56 downto 0 by 8
+                         collect (ldb (byte 8 shift) v)))))
+    (:string (string-byte-list (second form) nil))
+    (:zstring (string-byte-list (second form) t))
+    (t nil)))
+
+(defun alias-op (key)
+  "Single-instruction MMIXAL spellings. LDA is ADDU, not a four-instruction expansion."
+  (case key
+    (:lda :addu)
+    (:ldai :addui)
+    (t key)))
+
+(defun immediate-mnemonic-p (key)
+  (let ((s (symbol-name key)))
+    (and (> (length s) 1)
+         (char= (char s (1- (length s))) #\I)
+         (not (member key '(:puti :negi :negui))))))
+
 (defun encode-form (form labels pc)
-  "Return list of bytes (length 4 for instr, or data bytes)."
-  (let ((op (first form)))
-    (case op
-      ((:org label) nil)
-      ((:word)
-       (let ((v (u64 (second form))))
-         (loop for shift from 56 downto 0 by 8
-               collect (ldb (byte 8 shift) v))))
-      ((:byte)
-       (mapcar #'u8 (rest form)))
-      (otherwise
-       (cond
-         ((wyde-op-p op)
-          (let* ((x (parse-reg (second form)))
-                 (imm (resolve-imm (third form) labels pc
-                                   :relative (eq op 'geta)))
-                 (yz (if (eq op 'geta)
-                         (logand (sign-extend16 (logand imm #xFFFF)) #xFFFF)
-                         (u16 imm))))
-            ;; For GETA, resolve-imm already returned instruction delta
-            (when (eq op 'geta)
-              (setf yz (u16 imm)))
-            (list (op-byte op) x (ldb (byte 8 8) yz) (ldb (byte 8 0) yz))))
-         ((branch-op-p op)
-          (let* ((x (parse-reg (second form)))
-                 (delta (resolve-imm (third form) labels pc :relative t))
-                 (yz (u16 delta)))
-            (list (op-byte op) x (ldb (byte 8 8) yz) (ldb (byte 8 0) yz))))
-         ((eq op 'jmp)
-          (let* ((delta (resolve-imm (second form) labels pc :relative t))
-                 (xyz (logand delta #xFFFFFF)))
-            (list (op-byte 'jmp)
-                  (ldb (byte 8 16) xyz)
-                  (ldb (byte 8 8) xyz)
-                  (ldb (byte 8 0) xyz))))
-         ((eq op 'trap)
-          (list (op-byte 'trap)
-                (u8 (or (second form) 0))
-                (u8 (or (third form) 0))
-                (u8 (or (fourth form) 0))))
-         ((eq op 'set)
-          ;; SET $X,$Y  ≡  ORI $X,$Y,0
-          (let ((x (parse-reg (second form)))
-                (y (parse-reg (third form))))
-            (list (op-byte 'ori) x y 0)))
-         ((member op '(addi subi muli divi andi ori xori sli sri srui
-                       cmpi cmpui goi) :test #'eq)
-          (let ((x (parse-reg (second form)))
-                (y (parse-reg (third form)))
-                (imm (u8 (resolve-imm (fourth form) labels pc))))
-            (list (op-byte op) x y imm)))
-         (t
-          ;; Register-register: OP $X,$Y,$Z
-          (let ((x (parse-reg (second form)))
-                (y (parse-reg (third form)))
-                (z (parse-reg (fourth form))))
-            (list (op-byte op) x y z))))))))
+  (let ((key (alias-op (form-key (first form)))))
+    (cond
+      ((member key '(:org :label)) nil)
+      ((member key '(:byte :wyde :tetra :octa :word :string :zstring))
+       (emit-data-bytes form))
+      ((assoc key +branch-forward+)
+       (let* ((x (parse-reg (second form)))
+              (delta (label-delta labels pc (third form)))
+              (forward (cdr (assoc key +branch-forward+))))
+         (multiple-value-bind (op disp) (encode-relative forward delta 16)
+           (bytes4 op x (ldb (byte 8 8) disp) (ldb (byte 8 0) disp)))))
+      ((member key '(:jmp :jmpb))
+       (multiple-value-bind (op disp)
+           (encode-relative #xF0 (label-delta labels pc (second form)) 24)
+         (bytes4 op
+                 (ldb (byte 8 16) disp)
+                 (ldb (byte 8 8) disp)
+                 (ldb (byte 8 0) disp))))
+      ((eq key :trap)
+       (bytes4 (op-byte :trap)
+               (u8 (or (second form) 0))
+               (u8 (or (third form) 0))
+               (u8 (or (fourth form) 0))))
+      ((eq key :trip)
+       (bytes4 (op-byte :trip)
+               (u8 (or (second form) 0))
+               (u8 (or (third form) 0))
+               (u8 (or (fourth form) 0))))
+      ((eq key :pop)
+       (bytes4 (op-byte :pop)
+               (u8 (second form))
+               (ldb (byte 8 8) (u16 (or (third form) 0)))
+               (ldb (byte 8 0) (u16 (or (third form) 0)))))
+      ((eq key :get)
+       (bytes4 (op-byte :get) (parse-reg (second form)) 0
+               (parse-special (third form))))
+      ((eq key :put)
+       (bytes4 (op-byte :put) (parse-special (second form)) 0
+               (parse-reg (third form))))
+      ((eq key :puti)
+       (bytes4 (op-byte :puti) (parse-special (second form)) 0
+               (u8 (third form))))
+      ((member key '(:neg :negu :negi :negui))
+       (bytes4 (op-byte key)
+               (parse-reg (second form))
+               (u8 (third form))
+               (if (member key '(:negi :negui))
+                   (u8 (fourth form))
+                   (parse-reg (fourth form)))))
+      ((eq key :set)
+       (bytes4 (op-byte :ori) (parse-reg (second form))
+               (parse-reg (third form)) 0))
+      ((member key '(:swym :save :unsave))
+       (let ((xyz (logand (or (second form) 0) #xffffff)))
+         (bytes4 (op-byte key)
+                 (ldb (byte 8 16) xyz)
+                 (ldb (byte 8 8) xyz)
+                 (ldb (byte 8 0) xyz))))
+      ((eq key :sync)
+       (let ((xyz (logand (or (second form) 0) #xffffff)))
+         (bytes4 (op-byte :sync)
+                 (ldb (byte 8 16) xyz)
+                 (ldb (byte 8 8) xyz)
+                 (ldb (byte 8 0) xyz))))
+      ((eq key :resume)
+       (let ((xyz (logand (or (second form) 0) #xffffff)))
+         (bytes4 (op-byte :resume)
+                 (ldb (byte 8 16) xyz)
+                 (ldb (byte 8 8) xyz)
+                 (ldb (byte 8 0) xyz))))
+      ((member key '(:seth :setmh :setml :setl
+                      :inch :incmh :incml :incl
+                      :orh :ormh :orml :orl
+                      :andnh :andnmh :andnml :andnl))
+       (let ((raw (resolve-abs (third form) labels)))
+         (unless (<= 0 raw #xFFFF)
+           (error "Wyde immediate does not fit: ~S" (third form)))
+         (bytes4 (op-byte key) (parse-reg (second form))
+                 (ldb (byte 8 8) raw) (ldb (byte 8 0) raw))))
+      ((immediate-mnemonic-p key)
+       (let ((imm (resolve-abs (fourth form) labels)))
+         (unless (<= 0 imm 255)
+           (error "Immediate does not fit in a byte: ~S" (fourth form)))
+         (bytes4 (op-byte key)
+                 (parse-reg (second form))
+                 (parse-reg (third form))
+                 imm)))
+      (t
+       (bytes4 (op-byte key)
+               (parse-reg (second form))
+               (parse-reg (third form))
+               (parse-reg (fourth form)))))))
+
+(defun program-forms (program)
+  (if (and (consp program)
+           (symbolp (first program))
+           (string-equal (symbol-name (first program)) "PROGRAM"))
+      (rest program)
+      program))
 
 (defun assemble (program &key (origin 0))
-  "Assemble PROGRAM (list starting with PROGRAM or bare forms).
-Returns (values bytes origin labels)."
-  (let* ((forms (if (and (consp program)
-                         (symbolp (first program))
-                         (string-equal (symbol-name (first program)) "PROGRAM"))
-                    (rest program)
-                    program))
-         (org origin)
-         ;; allow leading :org
-         (_ (when (and forms (consp (first forms)) (eq (caar forms) :org))
-              (setf org (second (first forms)))))
-         (labels (collect-labels forms org))
-         (out (make-array 64 :element-type '(unsigned-byte 8)
-                          :adjustable t :fill-pointer 0))
-         (pc org))
-    (declare (ignore _))
-    (dolist (form forms)
-      (cond
-        ((and (consp form) (eq (first form) :org))
-         (setf pc (second form)))
-        ((and (consp form) (string-equal (symbol-name (first form)) "LABEL"))
-         nil)
-        ((consp form)
-         (let ((bytes (encode-form form labels pc)))
-           (dolist (b bytes)
-             (vector-push-extend b out))
-           (incf pc (length bytes))))))
-    (values (coerce out '(simple-array (unsigned-byte 8) (*)))
-            org
-            labels)))
+  "Assemble PROGRAM.
+Returns (values segments origin labels). SEGMENTS is a list of
+(address . byte-vector), one per contiguous run between :org directives."
+  (let* ((forms (program-forms program))
+         (org origin))
+    (when (and forms (consp (first forms)) (eq (form-key (caar forms)) :org))
+      (setf org (second (first forms))))
+    (let ((labels (collect-labels forms org))
+          (segments nil)
+          (buf nil)
+          (start nil)
+          (open nil)
+          (pc org))
+      (labels ((flush ()
+                 (when (and open buf)
+                   (push (cons start
+                               (coerce (nreverse buf)
+                                       '(simple-array (unsigned-byte 8) (*))))
+                         segments))
+                 (setf buf nil open nil)))
+        (dolist (form forms)
+          (cond
+            ((and (consp form) (eq (form-key (first form)) :org))
+             (flush)
+             (setf pc (second form) start pc open t))
+            ((and (consp form) (eq (form-key (first form)) :label))
+             nil)
+            ((consp form)
+             (unless open
+               (setf start pc open t))
+             (let ((bytes (encode-form form labels pc))
+                   (n (form-nbytes form)))
+               (unless (= (length bytes) n)
+                 (error "Assembler size mismatch for ~S: encoded ~D, declared ~D"
+                        form (length bytes) n))
+               (dolist (b bytes)
+                 (push b buf))
+               (incf pc n)))))
+        (flush))
+      (values (nreverse segments) org labels))))
 
 (defun assemble-into (vm program &key (origin 0))
-  "Assemble PROGRAM and write bytes into VM memory at ORIGIN (or :org)."
-  (multiple-value-bind (bytes org labels) (assemble program :origin origin)
-    (loop for i from 0 below (length bytes)
-          do (mem-set-u8 vm (+ org i) (aref bytes i)))
+  "Assemble PROGRAM and write each segment at its own address.
+PC becomes the first origin. Labels are stored on the VM."
+  (multiple-value-bind (segments org labels) (assemble program :origin origin)
+    (dolist (seg segments)
+      (loop for b across (cdr seg)
+            for i from 0
+            do (mem-set-u8 vm (+ (car seg) i) b)))
     (setf (vm-pc vm) (u64 org)
           (vm-halted vm) nil
-          (vm-cycles vm) 0)
+          (vm-cycles vm) 0
+          (vm-mems vm) 0
+          (vm-fault vm) nil
+          (vm-labels vm) labels)
     (values vm org labels)))
 
 (defun load-program (vm bytes &key (origin 0))

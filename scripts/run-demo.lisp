@@ -24,12 +24,15 @@
 (multiple-value-bind (f vm) (demo-factorial 10)
   (format t "10! = ~D  (cycles=~D)~%" f (vm-cycles vm)))
 
+(multiple-value-bind (f vm) (demo-recursive-factorial 10)
+  (format t "10! via PUSHJ/POP = ~D  (cycles=~D)~%" f (vm-cycles vm)))
+
 (format t "~%Registers (nonzero) after factorial:~%")
 (multiple-value-bind (_ vm) (demo-factorial 5)
   (declare (ignore _))
   (dump-registers vm))
 
-(format t "~%Putchar demo: ")
+(format t "~%Fputs demo: ")
 (finish-output)
 (cl-mmix::demo-putchar-hello)
 (format t "~%~%Demo finished successfully.~%")

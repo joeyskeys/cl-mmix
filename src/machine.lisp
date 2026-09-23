@@ -52,10 +52,12 @@
 (defconstant +page-size+ 4096)
 
 (defconstant +special-names+
-  #("B" "D" "E" "H" "J" "M" "R" "BB"
-    "C" "N" "O" "S" "I" "T" "TT" "K"
-    "Q" "U" "V" "G" "L" "A" "F" "P"
-    "W" "X" "Y" "Z" "WW" "XX" "YY" "ZZ"))
+  (if (boundp '+special-names+)
+      (symbol-value '+special-names+)
+      #("B" "D" "E" "H" "J" "M" "R" "BB"
+        "C" "N" "O" "S" "I" "T" "TT" "K"
+        "Q" "U" "V" "G" "L" "A" "F" "P"
+        "W" "X" "Y" "Z" "WW" "XX" "YY" "ZZ")))
 
 (define-condition mmix-fault (error)
   ((reason :initarg :reason :reader mmix-fault-reason))

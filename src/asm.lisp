@@ -314,9 +314,9 @@ Returns (values segments origin labels). SEGMENTS is a list of
                         form (length bytes) n))
                (dolist (b bytes)
                  (push b buf))
-               (incf pc n))))
+               (incf pc n)))))
         (flush))
-      (values (nreverse segments) org labels)))))
+      (values (nreverse segments) org labels))))
 
 (defun assemble-into (vm program &key (origin 0))
   "Assemble PROGRAM and write each segment at its own address.

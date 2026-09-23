@@ -176,6 +176,8 @@ sbcl --script tests/run-tests.lisp
 
 ## Limitations
 
+A prioritized comparison with Knuth’s MMIX and the needs of TAOCP practice is in [docs/TAOCP-GAP-ANALYSIS.md](docs/TAOCP-GAP-ANALYSIS.md). The VM now implements the document's recommended user-mode target; these items remain deferred:
+
 - Floating-point opcodes `#x01`–`#x17` and `LDSF`/`STSF` halt with `vm-fault` "floating point is not implemented".
 - `SAVE`/`UNSAVE` halt with "SAVE/UNSAVE is not implemented".
 - No `rV` page tables, no dynamic traps, no pipeline, no `υ`/`μ` counts beyond a simple `mems` counter.

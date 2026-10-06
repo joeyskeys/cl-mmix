@@ -1,6 +1,6 @@
 # cl-mmix vs MMIX: gap analysis for TAOCP practice
 
-> **Implementation status:** This analysis describes the pre-implementation MVP. Its recommended user-mode compatibility target was implemented in September 2026. See the current [README](../README.md) and tests for the authoritative feature set and remaining limitations.
+> **Historical document.** The paragraphs below describe the early MVP (flat registers, about 64 opcodes, private putchar `TRAP`). That is not the tree on `main`. The user-mode target recommended here was implemented afterwards. For the behavior of the current sources, read [IMPLEMENTATION.md](IMPLEMENTATION.md).
 
 Analysis only. This document records what the current code implements and what is still missing for a virtual machine that can be used to practice exercises from Knuth’s *The Art of Computer Programming* (TAOCP) with MMIX. It does not change the ISA.
 

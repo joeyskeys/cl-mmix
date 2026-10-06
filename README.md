@@ -4,6 +4,8 @@ A user-mode **MMIX** virtual machine in portable Common Lisp (tested on SBCL).
 
 It runs educational MMIXAL: the integer instruction set, the register stack, the four address segments, MMIX-SIM traps, and `.mmo` object files. It is not an MMIXware replacement: there is no pipeline, no virtual memory, and no IEEE floating point.
 
+What the code actually does, opcode by opcode, is written in [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md). [docs/TAOCP-GAP-ANALYSIS.md](docs/TAOCP-GAP-ANALYSIS.md) is the older gap analysis of the MVP that this VM replaced; it is not a description of the current sources.
+
 ## Features
 
 - 256 general registers with the `rL`/`rG` window (`rG` starts at 255, `rL` at 0). Marginal registers read as 0; writing one widens `rL` and zeros the gap.
@@ -27,6 +29,7 @@ cl-mmix/
   src/          package, util, machine, decode, trap, ops, asm, mmo, api
   tests/        assert-style tests (no FiveAM)
   scripts/run-demo.lisp
+  docs/         current implementation guide, plus the historical gap analysis
   README.md
 ```
 

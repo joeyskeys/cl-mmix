@@ -1,6 +1,6 @@
 # Current implementation
 
-This document describes the code on `main` (ASDF system `cl-mmix`, version 0.9.0). It is the place to look when the older [gap analysis](TAOCP-GAP-ANALYSIS.md) makes the VM sound like a small opcode subset. That analysis describes the MVP that this tree replaced.
+This document describes the code on `main` (ASDF system `cl-mmix`, version 0.9.0). It is what the sources do today. The distance from this tree to a full machine — kernel mode, the remaining opcodes, virtual memory, a pipeline, and shared-memory multi-core — is [TAOCP-GAP-ANALYSIS.md](TAOCP-GAP-ANALYSIS.md). The order of work is [plans/00-roadmap.md](plans/00-roadmap.md).
 
 The VM is a **user-mode functional interpreter** for educational MMIXAL. Every one of the 256 opcode bytes has a name in the decoder. The integer, bitwise, load/store, branch, wyde, register-stack, and MMIX-SIM `TRAP` instructions are executed. IEEE floating point and `SAVE`/`UNSAVE` are recognized and stop the machine with `vm-fault`. There is no pipeline, no page-table `rV`, and no dynamic trap entry into a kernel.
 
@@ -334,7 +334,7 @@ Exported from `cl-mmix` (see `src/package.lisp`):
 
 ## What is still not MMIX
 
-These are deliberate limits of this tree, not missing entries in an otherwise empty opcode table:
+The full catalog, including kernel mode and multi-core, is [TAOCP-GAP-ANALYSIS.md](TAOCP-GAP-ANALYSIS.md). The short list:
 
 - IEEE floating point (`#x01`–`#x17`, `LDSF`, `STSF`), including rounding. `rA` bits 17–16 are stored and ignored.
 - `SAVE` and `UNSAVE`.

@@ -485,10 +485,10 @@
            (assemble-into sv '(program (:org 0) (save) (setl $1 1) (trap 0 0 0)))
            (run-vm fp)
            (run-vm sv)
-           (list (reg fp 1) (and (search "floating point" (vm-fault fp)) t)
+           (list (reg fp 1) (vm-fault fp)
                  (reg sv 1) (and (search "SAVE/UNSAVE" (vm-fault sv)) t)
                  (vm-halted fp) (vm-halted sv)))
-         (list 0 t 0 t t t))
+         (list 1 nil 0 t t t))
 
   (check trip-and-resume
          (let ((vm (make-vm)))
@@ -652,6 +652,8 @@
            (load-mmo vm (mmo-bytes (mmo-data-loc-image)))
            (mem-ref-u32 vm #x2000000000000100))
          #xAABBCCDD)
+
+  (run-float-tests)
 
   (format t "~%Results: ~D passed, ~D failed~%" *pass* *fail*)
   (when *errors*

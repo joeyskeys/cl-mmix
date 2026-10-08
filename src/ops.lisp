@@ -265,7 +265,7 @@
       (#x88 (exec-load vm inst 4 t))
       (#x8A (exec-load vm inst 4 nil))
       ((#x8C #x8E #x96) (exec-load vm inst 8 nil))
-      (#x90 (unimplemented "LDSF"))
+      (#x90 (exec-ldsf vm inst))
       (#x92 (progn
               (incf (vm-mems vm))
               (set-reg vm (inst-x inst)
@@ -282,7 +282,7 @@
       (#xA8 (exec-store vm inst 4 t))
       (#xAA (exec-store vm inst 4 nil))
       ((#xAC #xAE #xB6) (exec-store vm inst 8 nil))
-      (#xB0 (unimplemented "STSF"))
+      (#xB0 (exec-stsf vm inst))
       (#xB2 (progn
               (incf (vm-mems vm))
               (mem-set-u32 vm (aligned-addr vm inst 2)
@@ -336,7 +336,7 @@
   (let ((op (inst-op inst)))
     (cond
       ((= op #x00) (exec-trap vm inst))
-      ((<= #x01 op #x17) (unimplemented "floating point"))
+      ((<= #x01 op #x17) (exec-float vm inst))
       ((<= #x18 op #x1F) (exec-muldiv vm inst))
       ((<= #x20 op #x2F) (exec-add vm inst))
       ((<= #x30 op #x37) (exec-cmp-neg vm inst))

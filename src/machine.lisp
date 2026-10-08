@@ -294,28 +294,73 @@ The register stack is rooted at Stack_Segment."
   (let ((cur (%ref-sized vm addr nbytes)))
     (%set-sized vm addr nbytes (logxor cur (logand value (1- (ash 1 (* 8 nbytes))))))))
 
+(defvar *yz-override* nil
+  "During RESUME ropcode 1, a cons (Y . Z) replacing the instruction's operands.")
+
 (defun event-vector (bit)
   "Trip-vector address for one rA event bit (D at 16 … X at 128)."
   (ecase bit
     (#x80 16) (#x40 32) (#x20 48) (#x10 64)
     (#x08 80) (#x04 96) (#x02 112) (#x01 128)))
 
+(defun trip-suppressed-p (vm)
+  "Instructions fetched from a negative address do not trip."
+  (logbitp 63 (vm-pc vm)))
+
 (defun do-trip (vm vector &key y z inst)
-  "Enter a trip handler at VECTOR. rW is the instruction after the one at PC."
-  (set-special vm +r-b+ (reg vm 255))
-  (set-special vm +r-w+ (u64 (+ (vm-pc vm) 4)))
-  (set-special vm +r-x+ (u64 (or inst 0)))
-  (set-special vm +r-y+ (u64 (or y 0)))
-  (set-special vm +r-z+ (u64 (or z 0)))
-  (setf (vm-pc vm) (u64 vector))
+  "Enter a trip handler at VECTOR (§35). Returns true when the trip is taken.
+rB saves the previous $255, $255 receives rJ, and rX is the raw tetra with
+bit 63 set. rW is the instruction after the one at PC. A negative PC does
+not trip."
+  (when (trip-suppressed-p vm)
+    (return-from do-trip nil))
+  (let ((saved-255 (reg vm 255)))
+    (set-special vm +r-b+ saved-255)
+    (set-reg vm 255 (special-reg vm +r-j+))
+    (set-special vm +r-w+ (u64 (+ (vm-pc vm) 4)))
+    (set-special vm +r-x+ (logior #x8000000000000000
+                                  (logand (u64 (or inst 0)) #xffffffff)))
+    (set-special vm +r-y+ (u64 (or y 0)))
+    (set-special vm +r-z+ (u64 (or z 0)))
+    (setf (vm-pc vm) (u64 vector)))
   t)
 
+(defun highest-event-bit (bits)
+  "Earliest bit of DVWIOUZX present in BITS."
+  (loop for bit in '(#x80 #x40 #x20 #x10 #x08 #x04 #x02 #x01)
+        when (logtest bits bit)
+          return bit))
+
+(defun record-event-bits (vm bits)
+  (when (plusp bits)
+    (set-special vm +r-a+ (logior (special-reg vm +r-a+) (logand bits #xff)))))
+
+(defun signal-events (vm bits &key y z inst)
+  "BITS is a mask of rA event bits. The earliest enabled bit trips and stays
+clear; every other bit is recorded. Nothing trips at a negative PC, and in
+that case every bit is recorded. Returns true when a trip is taken."
+  (setf bits (logand (or bits 0) #xff))
+  (when (zerop bits)
+    (return-from signal-events nil))
+  (let* ((enabled (logand bits (logand (ash (special-reg vm +r-a+) -8) #xff)))
+         (winner (and (plusp enabled)
+                      (not (trip-suppressed-p vm))
+                      (highest-event-bit enabled))))
+    (record-event-bits vm (if winner (logandc2 bits winner) bits))
+    (when winner
+      (do-trip vm (event-vector winner) :y y :z z :inst inst))))
+
 (defun signal-event (vm bit &key y z inst)
-  "Set an rA event bit. If the matching enable is set, trip. Returns true on trip."
-  (let ((a (logior (special-reg vm +r-a+) bit)))
-    (set-special vm +r-a+ a)
-    (when (logtest (ash bit 8) a)
-      (do-trip vm (event-vector bit) :y y :z z :inst inst))))
+  "Record one rA event bit, or trip when its enable is set. Returns true on trip."
+  (signal-events vm bit :y y :z z :inst inst))
+
+(defun suppress-exact-underflow (vm bits)
+  "Drop an exact U (U set, X clear, U enable clear), including for RESUME ropcode 2."
+  (if (and (logtest bits +ev-u+)
+           (not (logtest bits +ev-x+))
+           (not (logtest (special-reg vm +r-a+) (ash +ev-u+ 8))))
+      (logandc2 bits +ev-u+)
+      bits))
 
 (defun halt-vm (vm)
   (setf (vm-exit-code vm) (reg vm 255)

@@ -1,9 +1,8 @@
 (in-package #:cl-mmix)
 
 ;;; Opcode glue. Arithmetic stays in this directory; ops.lisp only dispatches.
-;;; Enabled exceptions use today's do-trip: every event bit is recorded, then
-;;; one trip is taken on the highest enabled bit. Plan 02 clears that bit and
-;;; rewrites the trip image.
+;;; Enabled exceptions trip through signal-events: the bit that trips stays
+;;; clear, and an earlier bit of DVWIOUZX wins when two enables are set.
 
 (defun current-round (vm)
   "rA bits 17–16. 00 is round-to-nearest; 01, 10, and 11 are off, up, and down."
@@ -22,13 +21,8 @@ register or the stored tetra has already been written."
                (not (logtest a (ash +ev-u+ 8))))
       (setf exc (logandc2 exc +u-bit+)))
     (let ((bits (ash (logand exc #x3f00) -8)))
-      (set-special vm +r-a+ (logior a bits))
-      (dolist (bit '(#x80 #x40 #x20 #x10 #x08 #x04 #x02 #x01))
-        (when (and (logtest bits bit)
-                   (logtest a (ash bit 8)))
-          (do-trip vm (event-vector bit) :y y :z z :inst inst)
-          (return-from commit-fp-exceptions :jump)))))
-  nil)
+      (when (signal-events vm bits :y y :z z :inst inst)
+        :jump))))
 
 (defun %fcmp (y z)
   (let ((k (fcomp y z)))
@@ -62,12 +56,14 @@ register or the stored tetra has already been written."
   (member op '(#x05 #x07 #x08 #x09 #x0A #x0B #x0C #x0D #x0E #x0F #x15 #x17)))
 
 (defun exec-float-unary (vm inst op)
-  (let ((y (inst-y inst)))
+  (let ((y (if *yz-override* (car *yz-override*) (inst-y inst))))
     (when (> y 4)
       (error 'mmix-fault :reason "illegal rounding mode"))
-    (let* ((z (if (member op '(#x09 #x0B #x0D #x0F))
-                  (inst-z inst)
-                  (reg vm (inst-z inst))))
+    (let* ((z (if *yz-override*
+                  (cdr *yz-override*)
+                  (if (member op '(#x09 #x0B #x0D #x0F))
+                      (inst-z inst)
+                      (reg vm (inst-z inst)))))
            (result (ecase op
                      (#x05 (fixit z y))
                      (#x07 (prog1 (fixit z y)
@@ -83,8 +79,8 @@ register or the stored tetra has already been written."
       (commit-fp-exceptions vm *fp-exceptions* (inst-raw inst) y z))))
 
 (defun exec-float-binary (vm inst op)
-  (let* ((y (reg vm (inst-y inst)))
-         (z (reg vm (inst-z inst)))
+  (let* ((y (if *yz-override* (car *yz-override*) (reg vm (inst-y inst))))
+         (z (if *yz-override* (cdr *yz-override*) (reg vm (inst-z inst))))
          (e (special-reg vm +r-e+))
          (result 0)
          (exc 0))

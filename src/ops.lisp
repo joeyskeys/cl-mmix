@@ -1,12 +1,19 @@
 (in-package #:cl-mmix)
 
+(defun y-operand (vm inst)
+  "Register $Y, or rY when RESUME ropcode 1 is inserting this instruction."
+  (if *yz-override*
+      (car *yz-override*)
+      (reg vm (inst-y inst))))
+
 (defun z-operand (vm inst)
-  (if (oddp (inst-op inst))
-      (inst-z inst)
-      (reg vm (inst-z inst))))
+  "Register $Z or the immediate Z field. RESUME ropcode 1 substitutes rZ."
+  (cond (*yz-override* (cdr *yz-override*))
+        ((oddp (inst-op inst)) (inst-z inst))
+        (t (reg vm (inst-z inst)))))
 
 (defun eff-addr (vm inst)
-  (u64 (+ (reg vm (inst-y inst)) (z-operand vm inst))))
+  (u64 (+ (y-operand vm inst) (z-operand vm inst))))
 
 (defun aligned-addr (vm inst shift)
   (logand (eff-addr vm inst) (lognot (1- (ash 1 shift)))))
@@ -32,9 +39,18 @@
 (defun unimplemented (what)
   (error 'mmix-fault :reason (format nil "~A is not implemented" what)))
 
+(defun illegal-instruction ()
+  "The b condition. Until plan 05 this halts with vm-fault."
+  (error 'mmix-fault :reason "illegal instruction"))
+
+(defun marginal-reg-p (vm n)
+  "True when $N is neither local nor global."
+  (let ((n (u8 n)))
+    (and (>= n (reg-l vm)) (< n (reg-g vm)))))
+
 (defun exec-muldiv (vm inst)
   (let* ((op (logand (inst-op inst) #xFE))
-         (y (reg vm (inst-y inst)))
+         (y (y-operand vm inst))
          (z (z-operand vm inst))
          (x (inst-x inst)))
     (ecase op
@@ -68,7 +84,7 @@
 
 (defun exec-add (vm inst)
   (let* ((op (logand (inst-op inst) #xFE))
-         (y (reg vm (inst-y inst)))
+         (y (y-operand vm inst))
          (z (z-operand vm inst))
          (x (inst-x inst)))
     (cond
@@ -87,18 +103,18 @@
 
 (defun exec-cmp-neg (vm inst)
   (let* ((op (logand (inst-op inst) #xFE))
-         (x (inst-x inst))
-         (imm (oddp (inst-op inst))))
+         (x (inst-x inst)))
     (cond
       ((or (= op #x30) (= op #x32))
-       (let ((y (reg vm (inst-y inst)))
+       (let ((y (y-operand vm inst))
              (z (z-operand vm inst)))
          (set-reg vm x (if (= op #x30) (cmp-signed y z) (cmp-unsigned y z)))))
       (t
        ;; NEG/NEGU: Y is an unsigned byte even in the register form.
-       (let* ((y (inst-y inst))
-              (z (if imm (inst-z inst) (reg vm (inst-z inst))))
-              (math (- y (i64-from-u64 z))))
+       ;; Ropcode 1 substitutes the full rY octa for that byte.
+       (let* ((y (if *yz-override* (car *yz-override*) (inst-y inst)))
+              (z (z-operand vm inst))
+              (math (- (i64-from-u64 (u64 y)) (i64-from-u64 z))))
          (set-reg vm x (u64 math))
          (when (and (= op #x34)
                     (not (<= +i64-min+ math +i64-max+)))
@@ -120,7 +136,7 @@
 
 (defun exec-shift (vm inst)
   (let* ((op (logand (inst-op inst) #xFE))
-         (y (reg vm (inst-y inst)))
+         (y (y-operand vm inst))
          (count (z-operand vm inst))
          (x (inst-x inst)))
     (ecase op
@@ -147,7 +163,7 @@
 (defun exec-condset (vm inst)
   (let* ((op (inst-op inst))
          (pred (pred-index op (if (>= op #x70) #x70 #x60)))
-         (hold (cond-holds pred (reg vm (inst-y inst))))
+         (hold (cond-holds pred (y-operand vm inst)))
          (z (z-operand vm inst)))
     (cond
       ((< op #x70)
@@ -157,7 +173,7 @@
 
 (defun exec-logic (vm inst)
   (let* ((op (logand (inst-op inst) #xFE))
-         (y (reg vm (inst-y inst)))
+         (y (y-operand vm inst))
          (z (z-operand vm inst))
          (notz (logxor z +u64-mask+)))
     (set-reg vm (inst-x inst)
@@ -220,8 +236,8 @@
     (when (and signed (< bytes 8)
                (not (fits-signed-p val (* 8 bytes))))
       (setf tripped (signal-event vm +ev-v+
-                                  :y (reg vm (inst-y inst))
-                                  :z (z-operand vm inst)
+                                  :y (eff-addr vm inst)
+                                  :z val
                                   :inst (inst-raw inst))))
     (write-int vm addr bytes val)
     (maybe-trip tripped)))
@@ -296,20 +312,26 @@
       (#xBE (exec-pushgo vm inst))
       (t (unimplemented (symbol-name (op-name (inst-op inst))))))))
 
+(defun wyde-field (op yz)
+  (ash (u16 yz)
+       (ecase (ldb (byte 2 0) op)
+         (0 48) (1 32) (2 16) (3 0))))
+
 (defun exec-wyde (vm inst)
   (let* ((op (inst-op inst))
-         (yz (inst-yz inst))
-         (shift (ecase (ldb (byte 2 0) op)
-                  (0 48) (1 32) (2 16) (3 0)))
          (group (ldb (byte 2 2) op))
-         (cur (reg vm (inst-x inst)))
-         (field (ash (u16 yz) shift)))
+         (y (if *yz-override* (car *yz-override*) (reg vm (inst-x inst))))
+         (z (if *yz-override*
+                (cdr *yz-override*)
+                (wyde-field op (inst-yz inst)))))
+    ;; SET ignores Y. INC/OR/ANDN use the previous $X, unless ropcode 1
+    ;; supplied rY in its place.
     (set-reg vm (inst-x inst)
              (ecase group
-               (0 field)
-               (1 (u64 (+ cur field)))
-               (2 (logior cur field))
-               (3 (logand cur (logxor field +u64-mask+))))))
+               (0 z)
+               (1 (u64 (+ y z)))
+               (2 (logior y z))
+               (3 (logand y (logxor z +u64-mask+))))))
   nil)
 
 (defun exec-jump (vm inst)
@@ -331,6 +353,79 @@
     (set-reg vm (inst-x inst) (u64 (+ (vm-pc vm) (* 4 disp)))))
   nil)
 
+(defun rop-nybble-ok-p (op)
+  "Ropcode 1 allows high nybbles #x0–#x3, #x6, #x7, #xC, #xD, and #xE."
+  (member (ash (u8 op) -4) '(0 1 2 3 6 7 12 13 14)))
+
+(defun finish-inserted (vm rw effect)
+  "After an inserted instruction: keep a jump or a halt, otherwise go to rW."
+  (cond
+    ((or (eq effect :jump) (eq effect :stop) (vm-halted vm))
+     (or effect :stop))
+    (t
+     (setf (vm-pc vm) rw)
+     :jump)))
+
+(defun exec-inserted (vm tetra rop)
+  "Execute TETRA as though it occupied rW−4. ROP 1 substitutes rY and rZ."
+  (let ((inst (decode tetra))
+        (rw (special-reg vm +r-w+)))
+    (when (and (= rop 1)
+               (or (not (rop-nybble-ok-p (inst-op inst)))
+                   (marginal-reg-p vm (inst-x inst))))
+      (illegal-instruction))
+    (when (= (inst-op inst) #xF9)
+      (illegal-instruction))
+    (setf (vm-pc vm) (u64 (- rw 4)))
+    (finish-inserted
+     vm rw
+     (if (= rop 1)
+         (let ((*yz-override* (cons (special-reg vm +r-y+)
+                                    (special-reg vm +r-z+))))
+           (execute vm inst))
+         (execute vm inst)))))
+
+(defun exec-resume-set (vm rx)
+  "Ropcode 2: $X ← rZ, then raise the exception bits in bits 47–40 of rX.
+$X must not be marginal. An enabled bit trips from rW−4."
+  (let* ((tetra (logand rx #xffffffff))
+         (x (ldb (byte 8 16) tetra))
+         (bits (suppress-exact-underflow vm (logand (ash rx -40) #xff)))
+         (ry (special-reg vm +r-y+))
+         (rz (special-reg vm +r-z+))
+         (rw (special-reg vm +r-w+)))
+    (when (marginal-reg-p vm x)
+      (illegal-instruction))
+    (set-reg vm x rz)
+    (setf (vm-pc vm) (u64 (- rw 4)))
+    (if (signal-events vm bits :y ry :z rz :inst tetra)
+        :jump
+        (progn
+          (setf (vm-pc vm) rw)
+          :jump))))
+
+(defun exec-resume (vm inst)
+  "RESUME 0. A negative rX returns to rW. Otherwise insert rX under its ropcode.
+Z ≠ 0 is still the unimplemented RESUME 1 path. A nonzero X or Y field, a
+ropcode above 2, and ropcode 3 are illegal."
+  (cond
+    ((not (zerop (inst-z inst)))
+     (unimplemented "RESUME with a nonzero XYZ"))
+    ((or (not (zerop (inst-x inst)))
+         (not (zerop (inst-y inst))))
+     (illegal-instruction))
+    (t
+     (let ((rx (special-reg vm +r-x+)))
+       (if (logbitp 63 rx)
+           (progn
+             (setf (vm-pc vm) (special-reg vm +r-w+))
+             :jump)
+           (case (ldb (byte 8 56) rx)
+             (0 (exec-inserted vm (logand rx #xffffffff) 0))
+             (1 (exec-inserted vm (logand rx #xffffffff) 1))
+             (2 (exec-resume-set vm rx))
+             (t (illegal-instruction))))))))
+
 (defun execute (vm inst)
   "Execute one instruction. Returns :JUMP, :STOP, or NIL (fall through)."
   (let ((op (inst-op inst)))
@@ -349,27 +444,34 @@
       ((or (= op #xF0) (= op #xF1)) (exec-jump vm inst))
       ((or (= op #xF2) (= op #xF3)) (exec-pushj vm inst))
       ((or (= op #xF4) (= op #xF5)) (exec-geta vm inst))
-      ((= op #xF6) (put-special vm (inst-x inst) (reg vm (inst-z inst))) nil)
-      ((= op #xF7) (put-special vm (inst-x inst) (inst-z inst)) nil)
+      ((= op #xF6)
+       (unless (zerop (inst-y inst)) (illegal-instruction))
+       (put-special vm (inst-x inst) (reg vm (inst-z inst)))
+       nil)
+      ((= op #xF7)
+       (unless (zerop (inst-y inst)) (illegal-instruction))
+       (put-special vm (inst-x inst) (inst-z inst))
+       nil)
       ((= op #xF8)
        (pop-frame vm (inst-x inst))
        (setf (vm-pc vm)
              (u64 (+ (special-reg vm +r-j+) (* 4 (inst-yz inst)))))
        :jump)
-      ((= op #xF9)
-       (unless (zerop (inst-xyz inst))
-         (unimplemented "RESUME with a nonzero XYZ"))
-       (setf (vm-pc vm) (special-reg vm +r-w+))
-       :jump)
+      ((= op #xF9) (exec-resume vm inst))
       ((or (= op #xFA) (= op #xFB))
        (unimplemented "SAVE/UNSAVE"))
       ((or (= op #xFC) (= op #xFD)) nil)
       ((= op #xFE)
+       (unless (zerop (inst-y inst)) (illegal-instruction))
        (set-reg vm (inst-x inst) (special-reg vm (inst-z inst)))
        nil)
       ((= op #xFF)
-       (do-trip vm 0 :y (inst-y inst) :z (inst-z inst) :inst (inst-raw inst))
-       :jump)
+       (if (do-trip vm 0
+                    :y (reg vm (inst-y inst))
+                    :z (reg vm (inst-z inst))
+                    :inst (inst-raw inst))
+           :jump
+           nil))
       (t (unimplemented (format nil "opcode #x~2,'0X" op))))))
 
 (defun step-vm (vm)

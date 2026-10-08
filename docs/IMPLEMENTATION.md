@@ -86,13 +86,13 @@ Status in the table means what `execute` does today.
 | `#xF0`–`#xF1` | `JMP`/`JMPB` | Executed. 24-bit relative branch. `XYZ = 0` jumps to itself. |
 | `#xF2`–`#xF3` | `PUSHJ`/`PUSHJB` | Executed. Register-stack push, `rJ ← PC+4`, then a 16-bit relative branch. |
 | `#xF4`–`#xF5` | `GETA`/`GETAB` | Executed. `$X ←` the target address. Control does not branch. |
-| `#xF6`–`#xF7` | `PUT`/`PUTI` | Executed. `PUT` writes `$Z` into special register `X`. `PUTI` writes the unsigned byte `Z`. See [PUT](#put). |
+| `#xF6`–`#xF7` | `PUT`/`PUTI` | Executed. `PUT` writes `$Z` into special register `X`. `PUTI` writes the unsigned byte `Z`. A nonzero `Y` field is an illegal instruction. See [PUT](#put). |
 | `#xF8` | `POP` | Executed. `X` is the number of return values. `PC ← rJ + 4*YZ`. |
-| `#xF9` | `RESUME` | `XYZ = 0` sets `PC ← rW`. Any other `XYZ` faults with "RESUME with a nonzero XYZ is not implemented". |
+| `#xF9` | `RESUME` | `Z ≠ 0` faults with "RESUME with a nonzero XYZ is not implemented". A nonzero `X` or `Y` field is an illegal instruction. `RESUME 0` returns to `rW` when `rX` is negative, and otherwise inserts the low tetra of `rX`. See [Trips](#trips). |
 | `#xFA`–`#xFB` | `SAVE`/`UNSAVE` | Not executed. Fault: "SAVE/UNSAVE is not implemented". |
 | `#xFC`–`#xFD` | `SYNC`/`SWYM` | No-ops. `SWYM` does not halt. |
-| `#xFE` | `GET` | Executed. `$X ←` special register `Z`, with no permission check. |
-| `#xFF` | `TRIP` | Executed. Enters the trip handler at address 0. See [Trips](#trips). |
+| `#xFE` | `GET` | Executed. `$X ←` special register `Z`, with no permission check. A nonzero `Y` field is an illegal instruction. |
+| `#xFF` | `TRIP` | Executed. Enters the trip handler at address 0 with the §35 register image. See [Trips](#trips). |
 
 Load and store addresses are aligned by clearing the low bits (`1`, `2`, `4`, or `8` bytes), not by trapping. An unaligned `STW` at address 1 therefore writes at address 0. Each load or store increments `vm-mems`. Prefetches, `SYNC*`, `SWYM`, and `LDVTS` do not.
 
@@ -112,7 +112,7 @@ All general-register values are stored as unsigned 64-bit patterns. Signed opera
 | `NEG` | `Y − $Z` as a signed value, `Y` an unsigned byte | `V` when the result does not fit |
 | `NEGU` | Same subtraction modulo 2^64 | no event |
 
-An event bit is always recorded. A trip happens only when the matching enable bit is set. Enables are `rA` bits 15–8, the event bit shifted up by 8. They default to 0, so overflow does not leave the instruction stream unless the program turned the enable on.
+An event bit is recorded when its enable is clear. When the enable is set, the instruction trips and that bit stays clear. Enables are `rA` bits 15–8, the event bit shifted up by 8. They default to 0, so overflow does not leave the instruction stream unless the program turned the enable on. An instruction at a negative address records the bit and does not trip. User mode still faults on a negative address before that instruction can run.
 
 ## Floating point
 
@@ -124,7 +124,7 @@ Comparisons write the integer −1, 0, or +1. `FCMP` of a NaN writes 0 and sets 
 
 `LDSF` loads an aligned tetra and widens it. `STSF` narrows with the current mode and stores that tetra. A binary64 value that does not fit binary32 sets `O` and `X` and still writes the short encoding. A signaling NaN is quieted and sets `I`. `STSF` does not set `V`.
 
-`W I O U Z X` are merged into `rA` after the result is written. Overflow always also sets `X`. Exact underflow sets `U` only when the `U` enable is on. When several enables are on, one trip is taken, at the highest enabled bit of `D V W I O U Z X`, and every event bit from that instruction stays set. Disabled exceptions deliver the IEEE default and do not leave the instruction stream.
+`W I O U Z X` are merged into `rA` after the result is written. Overflow always also sets `X`. Exact underflow sets `U` only when the `U` enable is on. When several enables are on, one trip is taken, at the earliest enabled bit of `D V W I O U Z X`. The bit that trips stays clear. Every other exception bit from that instruction is recorded, including one whose enable was also set. Disabled exceptions deliver the IEEE default and do not leave the instruction stream.
 
 ## Register window
 
@@ -218,11 +218,14 @@ Assembler specials accept `rJ`, `J`, or the number `4`. One leading `R` is strip
 
 ## Trips
 
-`signal-event` ORs an event bit into `rA`. If the enable is set, `do-trip` runs:
+`signal-events` takes a mask of `rA` event bits. A bit whose enable is clear is ORed into `rA`. The earliest enabled bit trips, and that bit stays clear. Every other bit in the mask is recorded. At a negative `PC` nothing trips and every bit is recorded.
 
-- `rB ← $255`
+`do-trip` enters the handler:
+
+- `rB ←` the previous `$255`
+- `$255 ← rJ`
 - `rW ← PC+4` (the instruction after the one that tripped)
-- `rX ←` the raw instruction
+- `rX ← #x8000000000000000` OR the raw tetra
 - `rY`, `rZ ←` the operands passed by the operation
 - `PC ←` the vector
 
@@ -237,7 +240,18 @@ Assembler specials accept `rJ`, `J`, or the number `4`. One leading `R` is strip
 | Z | `#x02` | 112 |
 | X | `#x01` | 128 |
 
-`TRIP X,Y,Z` always trips, to address 0, with `rY` and `rZ` taken from the instruction fields. The arithmetic result is written before the trip. A floating-point instruction that raises several enabled exceptions records every event bit, then trips once, to the vector of the highest enabled bit. `RESUME` with `XYZ = 0` continues at `rW`. There is no kernel, so `TRAP 0,0,1` (the hardware’s "resume into the kernel" encoding) records a fault and halts. The trip image itself is still the simplified one: `rX` is the raw instruction, and `$255` is not loaded from `rJ`.
+`TRIP X,Y,Z` trips to address 0, with `rY ← $Y` and `rZ ← $Z`. A `TRIP` fetched from a negative address does nothing. The arithmetic result is written before the trip. For a store, `rY` is the virtual address `$Y+Z` and `rZ` is the octa that would have been written. The store still completes.
+
+`RESUME` with `Z ≠ 0` faults with "RESUME with a nonzero XYZ is not implemented". A nonzero `X` or `Y` field is an illegal instruction and halts with `vm-fault`. There is no kernel, so `TRAP 0,0,1` still records a fault and halts.
+
+`RESUME 0` reads `rX`:
+
+- Bit 63 set: `PC ← rW`. The tetra in the low half of `rX` is not executed. This is the return from `TRIP` and from an arithmetic trip.
+- Otherwise the high byte is the ropcode and the low tetra is inserted as though it occupied `rW−4`. Relative branches and a new trip see that address. A fall-through then sets `PC ← rW`. A jump keeps the target the inserted instruction wrote.
+  - Ropcode 0 executes the tetra. An inserted `RESUME` is illegal.
+  - Ropcode 1 executes it with the operands replaced by `rY` and `rZ`. The opcode’s high nybble must be `#x0`–`#x3`, `#x6`, `#x7`, `#xC`, `#xD`, or `#xE`, and `$X` must not be marginal.
+  - Ropcode 2 sets `$X ← rZ`, where `X` is the second byte of the low tetra, and raises the exception bits in bits 47–40 of `rX`. `$X` must not be marginal. Exact underflow (`U` set, `X` clear, `U` enable clear) is dropped. An enabled bit trips.
+  - Ropcode 3 and above are illegal. Ropcode 3 belongs to `RESUME 1`.
 
 ## Traps
 
@@ -345,14 +359,14 @@ Exported from `cl-mmix` (see `src/package.lisp`):
 
 ## What the tests lock down
 
-`sbcl --script tests/run-tests.lisp` runs 73 checks. `tests/tests.lisp` covers decode, big-endian memory, the original sum/factorial/hello demos, the cycle limit, branch opcode bytes (`JMPB` is `#xF1FFFFFF` for a one-instruction backward jump; a forward `BZ` with displacement 2 is `#x42010002`), shift and divide edge cases, `MULU`’s high half, `LDA`/`2ADDU`/`16ADDU`, the register window and `PUT`, conditional sets, alignment and the `V` bit on `STB`, `MOR` byte reversal, `GO` leaving `rJ` alone, `PUSHJ`/`GETA`, recursive factorial, the page budget, kernel-address faults, `FADD` of zeros followed by the `SAVE` fault, `TRIP`/`RESUME`, an enabled `V` trip, `Fopen` refusing handles 0–2, legacy putchar, `Fgets`/`Fwrite`, breakpoints, and a hand-built `.mmo` image (including XOR, `lop_fixo`, a `Main` symbol, and a data-segment location). `tests/float.lisp` covers binary64 arithmetic, signed zero, ties to even, overflow with and without the `O` enable, `FDIV` by zero, `FSQRT` of −1, `FREM`, `FCMPE`/`FEQLE`, `LDSF`/`STSF`, and `FIX` of 2^63.
+`sbcl --script tests/run-tests.lisp` runs 81 checks. `tests/tests.lisp` covers decode, big-endian memory, the original sum/factorial/hello demos, the cycle limit, branch opcode bytes (`JMPB` is `#xF1FFFFFF` for a one-instruction backward jump; a forward `BZ` with displacement 2 is `#x42010002`), shift and divide edge cases, `MULU`’s high half, `LDA`/`2ADDU`/`16ADDU`, the register window and `PUT`, conditional sets, alignment and the `V` bit on `STB`, `MOR` byte reversal, `GO` leaving `rJ` alone, `PUSHJ`/`GETA`, recursive factorial, the page budget, kernel-address faults, `FADD` of zeros followed by the `SAVE` fault, `TRIP`/`RESUME 0` (including ropcodes 0–2 and a nonzero `Y` on `PUT`), an enabled `V` trip, `Fopen` refusing handles 0–2, legacy putchar, `Fgets`/`Fwrite`, breakpoints, and a hand-built `.mmo` image (including XOR, `lop_fixo`, a `Main` symbol, and a data-segment location). `tests/float.lisp` covers binary64 arithmetic, signed zero, ties to even, overflow with and without the `O` enable, `FDIV` by zero, `FSQRT` of −1, `FREM`, `FCMPE`/`FEQLE`, `LDSF`/`STSF`, and `FIX` of 2^63.
 
 ## What is still not MMIX
 
 The full catalog, including kernel mode and multi-core, is [TAOCP-GAP-ANALYSIS.md](TAOCP-GAP-ANALYSIS.md). The short list:
 
 - `SAVE` and `UNSAVE`.
-- `RESUME` other than `XYZ = 0`.
+- `RESUME 1` (`Z ≠ 0`). `RESUME 0` inserts ropcodes 0–2.
 - Virtual memory: no `rV`, no page tables, `LDVTS` returns 0, bit 63 is a hard fault rather than a kernel mapping.
 - Dynamic traps and the privileged specials that a kernel would update (`rT`, `rTT`, `rK`, `rQ`, `rC`, and the bootstrap copies).
 - A pipeline, prediction for `PB*`, and separate υ/μ counts. `vm-cycles` counts instructions. `vm-mems` counts loads and stores.

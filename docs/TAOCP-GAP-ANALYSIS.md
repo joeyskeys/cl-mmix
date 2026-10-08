@@ -31,12 +31,12 @@ Where this file and the code disagree, the code wins for “implemented” and `
 
 ## Baseline already in the tree
 
-These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (50 checks) and must keep `make-vm` usable as a user-mode interpreter.
+These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (81 checks) and must keep `make-vm` usable as a user-mode interpreter.
 
 - All 256 opcode bytes are named in `src/decode.lisp`.
 - Integer arithmetic, shifts, compares, bitwise ops, wyde immediates, conditional sets, branches (including backward and probable forms), `JMP`/`GETA`/`GO`/`PUSHJ`/`PUSHGO`/`POP`, tetra and immediate loads and stores, `LDHT`/`STHT`/`STCO`/`CSWAP`/`MOR`/`MXOR`.
 - The `rL`/`rG` window, a Lisp register stack, and `rO`/`rS` kept consistent with `Stack_Segment + 8*tau`.
-- `GET`/`PUT`/`PUTI` with the user-mode restrictions. `rA` event and enable bits. `TRIP` and `RESUME` with `XYZ = 0`, in a simplified form (see plan 02).
+- `GET`/`PUT`/`PUTI` with the user-mode restrictions, including a nonzero `Y` field as an illegal instruction. `rA` event and enable bits. `TRIP` and `RESUME 0` with the §35 image and ropcodes 0–2 (plan 02).
 - Four segments, sparse 4096-byte grow-on-touch chunks, a page budget (`:memory-size`, default `#x2000000`). Those chunks are an allocator granule. They are not architectural pages (`2^s` with `s ≥ 13`).
 - MMIX-SIM `TRAP` services Y = 0…10, intercepted in Lisp. Handles 0–2 are StdIn, StdOut, StdErr. Legacy putchar is opt-in.
 - S-expression assembler, `.mmo` loader, breakpoints, `step-vm` / `run-vm` / `continue-vm`, dumps.
@@ -47,8 +47,8 @@ These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (
 
 | Plan | Gap | Current | Full target |
 |------|-----|---------|-------------|
-| [01](plans/01-floating-point.md) | Floating point | Opcodes execute in `src/float/`. Enabled exceptions still use today's trip image | Same arithmetic; plan 02 supplies the spec trip entry |
-| [02](plans/02-trips-and-resume.md) | Trips and `RESUME 0` | Trip enters a vector; `rX` is the raw tetra; `RESUME` always jumps to `rW` | §35 and §38: negative `rX`, `$255 ← rJ`, ropcodes 0–2 |
+| [01](plans/01-floating-point.md) | Floating point | Opcodes execute in `src/float/`. Enabled exceptions use the plan 02 trip image | Same arithmetic |
+| [02](plans/02-trips-and-resume.md) | Trips and `RESUME 0` | Implemented. §35 image, event bit clear on the trip that is taken, ropcodes 0–2 | §35 and §38: negative `rX`, `$255 ← rJ`, ropcodes 0–2 |
 | [03](plans/03-save-unsave.md) | `SAVE` / `UNSAVE` | Fault "SAVE/UNSAVE is not implemented" | §43 context image; interruptible spill once traps exist |
 | [04](plans/04-machine-specials.md) | `rC` `rF` `rI` `rN` `rU` | Slots exist and stay 0; `PUT` ignores them | Interval timer, usage counter, frozen serial, failure address, continuation page |
 | [05](plans/05-kernel-traps.md) | Forced and dynamic traps | `TRAP` is a Lisp syscall; bit 63 halts; privileged `PUT` is a silent no-op | `rT` / `rTT`, `rK`/`rQ`, `rwxnkbsp`, `RESUME 1`, kernel ROM for MMIX-SIM |
@@ -69,13 +69,13 @@ Dependency order is in the [roadmap](plans/00-roadmap.md). Plans 01, 02, 03, 08,
 | Bytes | Names | Fault string |
 |-------|--------|----------------|
 | `#xFA`–`#xFB` | `SAVE`/`UNSAVE` | "SAVE/UNSAVE is not implemented" |
-| `#xF9` with `XYZ ≠ 0` | `RESUME 1` and any other Z | "RESUME with a nonzero XYZ is not implemented" |
+| `#xF9` with `Z ≠ 0` | `RESUME 1` | "RESUME with a nonzero XYZ is not implemented" |
 
 Everything else has a handler. Several handlers are the functional single-processor approximation of an instruction whose real effect is a cache, a pipe drain, a translation cache, or a kernel entry. Those are gaps of meaning, listed below, and they are not missing names in `*op-name*`.
 
 ### Floating point (§21–28, plan 01)
 
-The arithmetic is in `src/float/`. Registers hold binary64 patterns, `LDSF`/`STSF` widen and narrow binary32, and `rA` bits 17–16 select the rounding mode. What plan 02 still owes this path is the trip image: today every event bit stays set, `rX` is the raw instruction, and `$255` is not loaded from `rJ`. The handler that runs is already the highest enabled bit of `D V W I O U Z X`.
+The arithmetic is in `src/float/`. Registers hold binary64 patterns, `LDSF`/`STSF` widen and narrow binary32, and `rA` bits 17–16 select the rounding mode. An enabled exception uses the plan 02 trip: the bit that trips stays clear, `$255` is loaded from `rJ`, and `rX` has bit 63 set. The handler is the earliest enabled bit of `D V W I O U Z X`.
 
 ### `SAVE` / `UNSAVE` (§43, plan 03)
 
@@ -83,20 +83,11 @@ The arithmetic is in `src/float/`. Registers hold binary64 patterns, `LDSF`/`STS
 
 `UNSAVE 0,$Z` restores that image. It is destructive: a second `UNSAVE` of the same image is not reliable. Both instructions are interruptible in the architecture. The official loader starts a process by `UNSAVE` of a fabricated image (MMIX-SIM §37). Today `load-mmo` applies `lop_post` directly and sets `PC` from `Main`.
 
-### Trips that do not match §35 (plan 02)
+### Trips (§35, plan 02)
 
-`do-trip` in `src/machine.lisp` writes `rB ← $255`, `rW ← PC+4`, `rX ←` the raw tetra, `rY`/`rZ` from the keyword arguments, and `PC ←` the vector. `signal-event` ORs the event bit into `rA` and then trips when the enable is set.
+Landed. `do-trip` writes the §35 image: bit 63 of `rX` set, `rB ←` the old `$255`, `$255 ← rJ`, `rY`/`rZ` from the operands, `rW ← PC+4`. An enabled exception leaves its event bit clear. When several enables fire, the earliest bit of `D V W I O U Z X` trips and the other bits are recorded. A negative `PC` records every bit and does not trip. Store trips put the virtual address in `rY` and the octa that would have been stored in `rZ`.
 
-§35 differs in all of the following:
-
-- A `TRIP` sets the high tetra of `rX` to `#x80000000`, sets `rY ← $Y` and `rZ ← $Z` (register contents, not the Y and Z fields), sets `rB ←` the old `$255`, and sets `$255 ← rJ`.
-- An enabled arithmetic exception does the same kind of entry at `16, 32, …, 128`. The event bit records an exception that was **not** tripped. An enabled exception therefore trips with that event bit left clear.
-- Instructions at negative virtual addresses do not take trip handlers.
-- Store trips put the virtual address in `rY` and the full octa that would be stored in `rZ`.
-
-`RESUME` with `XYZ = 0` (§38): if `rX` is negative, fetch at `rW`. If `rX` is nonnegative, insert the low tetra of `rX` as if it stood at `rW−4`, under the ropcode in the high byte of `rX`. Ropcode 0 inserts it. Ropcode 1 substitutes `rY` and `rZ` as the operands. Ropcode 2 sets `$X ← rZ` and raises the exception bits in bits 47–40 of `rX` (the third byte from the left). Today every `RESUME 0` jumps to `rW` and ignores `rX`.
-
-`GET` and `PUT` require `Y = 0`. A nonzero `Y` is an illegal instruction. The handlers ignore `Y`.
+`RESUME 0` returns to `rW` when `rX` is negative. Otherwise it inserts the low tetra under ropcodes 0–2. Ropcode 3 and `RESUME` with `Z ≠ 0` wait for plan 05. `GET` and `PUT` with a nonzero `Y` field are illegal instructions.
 
 ## Kernel, traps, and specials that stay zero
 

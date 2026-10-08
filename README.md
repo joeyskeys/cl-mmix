@@ -16,7 +16,7 @@ What the code actually does, opcode by opcode, is written in [docs/IMPLEMENTATIO
 - Loads and stores of byte, wyde, tetra, and octa, plus the immediate forms. Addresses are aligned by masking low bits. Signed stores that do not fit set `V` and still write the low bytes.
 - Bitwise operations: `AND`/`OR`/`XOR` and their complements, `BDIF`/`WDIF`/`TDIF`/`ODIF`, `MUX`, `SADD`, `MOR`/`MXOR`, wyde immediates, `LDHT`/`STHT`/`STCO`, and `CSWAP`.
 - `CS*`/`ZS*`, branches (`BN`…`PBV` and the backward opcodes), `JMP`/`JMPB`, `GETA`/`GETAB`.
-- `TRIP` and `RESUME` with `XYZ` = 0. Arithmetic trips only when the matching `rA` enable bit is set.
+- `TRIP` and `RESUME 0`. A trip saves `$255` in `rB`, loads `$255` from `rJ`, and sets bit 63 of `rX`. An enabled arithmetic exception trips with that event bit left clear. `RESUME 0` returns to `rW` or inserts the tetra in `rX` under ropcodes 0–2.
 - Four segments, sparse 4096-byte pages, untouched reads are 0. `:memory-size` is a page budget (at least one page), not a flat array length.
 - MMIX-SIM `TRAP` services: Halt, Fopen, Fclose, Fread, Fwrite, Fgets, Fgetws, Fputs, Fputws, Fseek, Ftell. Handles 0–2 are StdIn, StdOut, and StdErr.
 - S-expression assembler that emits real forward and backward opcodes, and a `.mmo` loader (content is XOR-ed in, as in MMIXware).
@@ -100,7 +100,7 @@ The hidden register stack is a Lisp vector. `rO` and `rS` stay consistent with `
 
 `$0` … `$(rL−1)` are local, `$rL` … `$(rG−1)` are marginal, and `$rG` … `$255` are global. `PUT rL` ignores a new value that is not smaller. `PUT rG` clamps at 32; if the new `rG` is below `rL`, `rL` drops to match. Raising `rG` zeros registers that become marginal. Lowering `rG` zeros former marginals that become global and keeps former locals that become global.
 
-`rA` event bits, from bit 7 down to bit 0, are `DVWIOUZX`. Enables are bits 15–8 and default to 0, so an overflow records `V` without tripping. Trip vectors are D=16, V=32, W=48, I=64, O=80, U=96, Z=112, X=128. `TRIP` itself enters at 0.
+`rA` event bits, from bit 7 down to bit 0, are `DVWIOUZX`. Enables are bits 15–8 and default to 0, so an overflow records `V` without tripping. An enabled exception trips and leaves that event bit clear. Trip vectors are D=16, V=32, W=48, I=64, O=80, U=96, Z=112, X=128. `TRIP` itself enters at 0.
 
 ## TRAP (MMIX-SIM)
 
@@ -183,9 +183,8 @@ sbcl --script tests/run-tests.lisp
 [docs/TAOCP-GAP-ANALYSIS.md](docs/TAOCP-GAP-ANALYSIS.md) is the gap between this tree and a full machine (kernel, remaining opcodes, virtual memory, pipeline, and multi-core). [docs/plans/00-roadmap.md](docs/plans/00-roadmap.md) is the order of work. The largest holes:
 
 - `SAVE`/`UNSAVE` halt with "SAVE/UNSAVE is not implemented".
-- An enabled floating-point exception trips with today's entry: the event bit stays set, and `rX` is the raw instruction.
 - No `rV` page tables, no dynamic traps, no pipeline, no `υ`/`μ` counts beyond a simple `mems` counter.
-- `RESUME` accepts only `XYZ` = 0 (`PC ← rW`).
+- `RESUME 1` (`Z ≠ 0`) is not implemented. `RESUME 0` inserts ropcodes 0–2.
 - `SWYM` does not halt. `PRE*`/`SYNC*`/`SYNCD`/`SYNCID` are no-ops. `LDUNC`/`STUNC` are ordinary octa accesses. `LDVTS` returns 0.
 - `Fopen` text and binary modes are not newline-translated.
 

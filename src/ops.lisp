@@ -492,16 +492,22 @@ Calling STEP-VM again while stopped executes that instruction."
           (setf (vm-break vm) (list :exec (vm-pc vm)))
           (return-from step-vm vm)))))
   (setf (vm-watch-hit vm) nil)
+  ;; An execute breakpoint returned above and did not retire. rI and rU
+  ;; advance only after a successful execute, beside this cycle count.
+  ;; A fault does not retire. One rI tick is one instruction until plan 08.
   (incf (vm-cycles vm))
-  (handler-case
-      (let* ((word (fetch vm))
-             (inst (decode word))
-             (effect (execute vm inst)))
-        (unless (or (eq effect :jump) (eq effect :stop) (vm-halted vm))
-          (setf (vm-pc vm) (u64 (+ (vm-pc vm) 4)))))
-    (mmix-fault (e)
-      (setf (vm-fault vm) (mmix-fault-reason e)
-            (vm-halted vm) t)))
+  (let ((retired-pc (vm-pc vm)))
+    (handler-case
+        (let* ((word (fetch vm))
+               (inst (decode word))
+               (effect (execute vm inst)))
+          (unless (or (eq effect :jump) (eq effect :stop) (vm-halted vm))
+            (setf (vm-pc vm) (u64 (+ (vm-pc vm) 4))))
+          (note-usage vm (inst-op inst) retired-pc)
+          (tick-interval vm))
+      (mmix-fault (e)
+        (setf (vm-fault vm) (mmix-fault-reason e)
+              (vm-halted vm) t))))
   (when (and (vm-watch-hit vm) (not (vm-halted vm)))
     (setf (vm-break vm) (vm-watch-hit vm)))
   vm)

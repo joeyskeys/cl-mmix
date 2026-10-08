@@ -31,13 +31,14 @@ Where this file and the code disagree, the code wins for “implemented” and `
 
 ## Baseline already in the tree
 
-These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (85 checks) and must keep `make-vm` usable as a user-mode interpreter.
+These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (92 checks) and must keep `make-vm` usable as a user-mode interpreter.
 
 - All 256 opcode bytes are named in `src/decode.lisp`.
 - Integer arithmetic, shifts, compares, bitwise ops, wyde immediates, conditional sets, branches (including backward and probable forms), `JMP`/`GETA`/`GO`/`PUSHJ`/`PUSHGO`/`POP`, tetra and immediate loads and stores, `LDHT`/`STHT`/`STCO`/`CSWAP`/`MOR`/`MXOR`.
 - The `rL`/`rG` window, a Lisp register stack, and `rO`/`rS` kept consistent with `Stack_Segment + 8*tau`.
 - `GET`/`PUT`/`PUTI` with the user-mode restrictions, including a nonzero `Y` field as an illegal instruction. `rA` event and enable bits. `TRIP` and `RESUME 0` with the §35 image and ropcodes 0–2 (plan 02).
 - `SAVE` and `UNSAVE` of the §43 register image (plan 03). The instruction runs to completion inside one `step-vm`.
+- `rN`, `rI`, `rU`, and `rF` (plan 04). `rN` is frozen at creation. `rI` and `rU` advance once per retired instruction. A refused page is stored in `rF`. `PUT` of these registers stays ignored. `rQ` bit 6 does not trap yet.
 - Four segments, sparse 4096-byte grow-on-touch chunks, a page budget (`:memory-size`, default `#x2000000`). Those chunks are an allocator granule. They are not architectural pages (`2^s` with `s ≥ 13`).
 - MMIX-SIM `TRAP` services Y = 0…10, intercepted in Lisp. Handles 0–2 are StdIn, StdOut, StdErr. Legacy putchar is opt-in.
 - S-expression assembler, `.mmo` loader, breakpoints, `step-vm` / `run-vm` / `continue-vm`, dumps.
@@ -51,7 +52,7 @@ These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (
 | [01](plans/01-floating-point.md) | Floating point | Opcodes execute in `src/float/`. Enabled exceptions use the plan 02 trip image | Same arithmetic |
 | [02](plans/02-trips-and-resume.md) | Trips and `RESUME 0` | Implemented. §35 image, event bit clear on the trip that is taken, ropcodes 0–2 | §35 and §38: negative `rX`, `$255 ← rJ`, ropcodes 0–2 |
 | [03](plans/03-save-unsave.md) | `SAVE` / `UNSAVE` | Implemented. §43 image in one step; `POP` after `SAVE` faults | Interruptible spill once traps exist |
-| [04](plans/04-machine-specials.md) | `rC` `rF` `rI` `rN` `rU` | Slots exist and stay 0; `PUT` ignores them | Interval timer, usage counter, frozen serial, failure address, continuation page |
+| [04](plans/04-machine-specials.md) | `rC` `rF` `rI` `rN` `rU` | Implemented. `rN` frozen, `rI` sets `rQ` bit 6, `rU` counts retired opcodes, `rF` records a refused page. `rC` is stored and not read | Interval delivery through `rTT`; `rC` consulted on a stack spill |
 | [05](plans/05-kernel-traps.md) | Forced and dynamic traps | `TRAP` is a Lisp syscall; bit 63 halts; privileged `PUT` is a silent no-op | `rT` / `rTT`, `rK`/`rQ`, `rwxnkbsp`, `RESUME 1`, kernel ROM for MMIX-SIM |
 | [06](plans/06-virtual-memory.md) | `rV` translation | Flat segments; `LDVTS` returns 0 | PTEs, PTPs, protection, translation caches, MMIO at physical `≥ 2^48` |
 | [07](plans/07-cache-and-sync.md) | Caches and `SYNC` | `PRE*`/`SYNC*`/`LDUNC`/`STUNC` are nops or plain octas | §30–31 on one processor: caches, prefetch, ordering, privileged `SYNC` |
@@ -117,13 +118,13 @@ Today bit 63 of an address signals `mmix-fault` and halts. `PUT` of `rC`, `rN`, 
 
 | Register | Specified role | Today |
 |----------|----------------|-------|
-| `rN` | Version in the high three bytes, Unix time of this instance in the low five. Frozen | 0 |
-| `rI` | Decrements; at 0 it requests the interval interrupt (bit 6 of `rQ`, the next-to-leftmost bit of the machine byte) | 0, no decrement |
-| `rU` | Usage pattern, mask, and 47-bit count of retired opcodes that match | 0 |
-| `rC` | Physical continuation page, PTE-shaped, used when a register-stack spill would fault | 0 |
-| `rF` | Physical address of a memory fault (parity and similar), often unrelated to `rW` | 0 |
+| `rN` | Version in the high three bytes, Unix time of this instance in the low five. Frozen | `#x010000` and the creation time. `PUT` does not change it |
+| `rI` | Decrements; at 0 it requests the interval interrupt (bit 6 of `rQ`, the next-to-leftmost bit of the machine byte) | Counts retired instructions. The 1→0 step sets `rQ` bit 6. No trap yet |
+| `rU` | Usage pattern, mask, and 47-bit count of retired opcodes that match | Counts after each retirement. Bit 47 is the negative-address flag |
+| `rC` | Physical continuation page, PTE-shaped, used when a register-stack spill would fault | Raw octa, not interpreted. `PUT` ignored |
+| `rF` | Physical address of a memory fault (parity and similar), often unrelated to `rW` | Page-budget failure stores the refused page base |
 | `rK` | Interrupt mask. Cleared by `TRAP`. User programs need it all-ones to avoid an `s` trap | 0, ignored |
-| `rQ` | Interrupt requests | 0 |
+| `rQ` | Interrupt requests | Bit 6 can be set by `rI`. `PUT` ignored. No dynamic trap |
 | `rT`, `rTT` | Forced-trap and dynamic-trap entry | 0 |
 | `rV` | Page-table root, page size, address-space number, software-translation flag | 0 |
 

@@ -24,6 +24,19 @@
 (defconstant +r-l+  20)
 (defconstant +r-a+  21)
 (defconstant +r-f+  22)
+
+;;; High three bytes of rN (§41). mmix-doc version 1.0.0.
+(defconstant +arch-version+ #x010000)
+
+;;; Common Lisp universal time is seconds since 1900-01-01 UTC.
+;;; rN's low five bytes are seconds since 1970-01-01 UTC.
+(defconstant +unix-epoch+ 2208988800)
+
+;;; rC holds a continuation-page PTE for plan 06. This interpreter stores the
+;;; octa and does not interpret it. PUT rC stays ignored on the user-mode path.
+;;; Once the page size is 2^s, the PTE is: ignored high bits, a physical page
+;;; number in a (48−s)-bit field, ignored (s−13) bits, a 10-bit address-space
+;;; number, and the protection bits pr pw px.
 (defconstant +r-p+  23)
 (defconstant +r-w+  24)
 (defconstant +r-x+  25)
@@ -123,6 +136,7 @@ The register stack is rooted at Stack_Segment."
              :input input
              :legacy-putchar (and legacy-putchar t))))
     (set-special vm +r-g+ 255)
+    (stamp-serial vm)
     (sync-stack vm)
     (init-files vm)
     vm))
@@ -149,10 +163,12 @@ The register stack is rooted at Stack_Segment."
         (fill-pointer (vm-error-output vm)) 0
         (fill-pointer (vm-stack vm)) 0)
   (when clear-registers
-    (fill (vm-registers vm) 0)
-    (fill (vm-special vm) 0)
-    (set-special vm +r-g+ 255)
-    (init-files vm))
+    (let ((serial (special-reg vm +r-n+)))
+      (fill (vm-registers vm) 0)
+      (fill (vm-special vm) 0)
+      (set-special vm +r-g+ 255)
+      (set-special vm +r-n+ serial)
+      (init-files vm)))
   (when clear-memory
     (clrhash (vm-memory vm))
     (setf (vm-mem-bytes vm) 0))
@@ -181,6 +197,42 @@ The register stack is rooted at Stack_Segment."
 
 (defun reg-l (vm) (special-reg vm +r-l+))
 (defun reg-g (vm) (special-reg vm +r-g+))
+
+(defun stamp-serial (vm)
+  "Freeze rN. High three bytes are +ARCH-VERSION+. Low five bytes are the
+Unix time at which this VM was created. Later PUT and reset-vm leave it."
+  (set-special vm +r-n+
+               (logior (ash +arch-version+ 40)
+                       (logand (- (get-universal-time) +unix-epoch+)
+                               #xffffffffff)))
+  vm)
+
+(defun tick-interval (vm)
+  "One retired instruction. rI counts down; the step from 1 to 0 sets rQ bit 6.
+Until plan 08 a tick is one instruction, not one υ. The bit does not trap yet."
+  (let ((ri (special-reg vm +r-i+)))
+    (when (plusp ri)
+      (let ((next (1- ri)))
+        (set-special vm +r-i+ next)
+        (when (zerop next)
+          (set-special vm +r-q+ (logior (special-reg vm +r-q+) (ash 1 6)))))))
+  vm)
+
+(defun note-usage (vm op pc)
+  "Count a retired opcode in rU. up is bits 63–56, um is bits 55–48, bit 47
+is the kernel-counting flag, and uc is bits 46–0, incremented modulo 2^47.
+A negative PC counts only when bit 47 is set. The fetched opcode is the one
+that retires; an instruction inserted by RESUME is part of that RESUME."
+  (let* ((ru (special-reg vm +r-u+))
+         (up (ldb (byte 8 56) ru))
+         (um (ldb (byte 8 48) ru)))
+    (when (and (= (logand (logand op #xff) um) up)
+               (or (not (logbitp 63 (u64 pc)))
+                   (logbitp 47 ru)))
+      (let ((uc (logand (1+ (logand ru #x7fffffffffff)) #x7fffffffffff)))
+        (set-special vm +r-u+
+                     (logior (logand ru (lognot #x7fffffffffff)) uc)))))
+  vm)
 
 (defun reg (vm n)
   "Read general register N under the rL/rG window. Marginal registers read as 0."
@@ -218,9 +270,12 @@ The register stack is rooted at Stack_Segment."
   (or (gethash page (vm-memory vm))
       (when write-p
         (when (> (+ (vm-mem-bytes vm) +page-size+) (vm-mem-limit vm))
-          (error 'mmix-fault
-                 :reason (format nil "memory limit exceeded (~D bytes) at #x~X"
-                                 (vm-mem-limit vm) (* page +page-size+))))
+          (let ((addr (* page +page-size+)))
+            ;; rF records the refused physical address. It is not rW.
+            (set-special vm +r-f+ addr)
+            (error 'mmix-fault
+                   :reason (format nil "memory limit exceeded (~D bytes) at #x~X"
+                                   (vm-mem-limit vm) addr))))
         (incf (vm-mem-bytes vm) +page-size+)
         (setf (gethash page (vm-memory vm))
               (make-array +page-size+

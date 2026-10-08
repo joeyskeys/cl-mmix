@@ -1,5 +1,7 @@
 # Plan 04 — Machine specials
 
+Status: implemented. `stamp-serial`, `tick-interval`, and `note-usage` in `src/machine.lisp`. `step-vm` calls the counters after a retired instruction. `PUT` of these registers stays ignored on the user-mode path. `rQ` bit 6 does not trap until plan 05. `rC` is stored and not interpreted until plan 06.
+
 Depends on nothing for the counters and the frozen serial. Raising `rQ` has no effect until plan 05. The continuation page is consulted when plan 06’s protection faults exist; this plan stores `rC` in the architectural format.
 
 Spec: `mmix-doc` §40 (`rI`, `rU`), §41 (`rN`), §45 (`rC`), §48 (`rF`).

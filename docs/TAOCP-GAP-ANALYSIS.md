@@ -31,7 +31,7 @@ Where this file and the code disagree, the code wins for “implemented” and `
 
 ## Baseline already in the tree
 
-These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (92 checks) and must keep `make-vm` usable as a user-mode interpreter.
+These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (109 checks) and must keep `make-vm` usable as a user-mode interpreter.
 
 - All 256 opcode bytes are named in `src/decode.lisp`.
 - Integer arithmetic, shifts, compares, bitwise ops, wyde immediates, conditional sets, branches (including backward and probable forms), `JMP`/`GETA`/`GO`/`PUSHJ`/`PUSHGO`/`POP`, tetra and immediate loads and stores, `LDHT`/`STHT`/`STCO`/`CSWAP`/`MOR`/`MXOR`.
@@ -53,7 +53,7 @@ These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (
 | [02](plans/02-trips-and-resume.md) | Trips and `RESUME 0` | Implemented. §35 image, event bit clear on the trip that is taken, ropcodes 0–2 | §35 and §38: negative `rX`, `$255 ← rJ`, ropcodes 0–2 |
 | [03](plans/03-save-unsave.md) | `SAVE` / `UNSAVE` | Implemented. §43 image in one step; `POP` after `SAVE` faults | Interruptible spill once traps exist |
 | [04](plans/04-machine-specials.md) | `rC` `rF` `rI` `rN` `rU` | Implemented. `rN` frozen, `rI` sets `rQ` bit 6, `rU` counts retired opcodes, `rF` records a refused page. `rC` is stored and not read | Interval delivery through `rTT`; `rC` consulted on a stack spill |
-| [05](plans/05-kernel-traps.md) | Forced and dynamic traps | `TRAP` is a Lisp syscall; bit 63 halts; privileged `PUT` is a silent no-op | `rT` / `rTT`, `rK`/`rQ`, `rwxnkbsp`, `RESUME 1`, kernel ROM for MMIX-SIM |
+| [05](plans/05-kernel-traps.md) | Forced and dynamic traps | Implemented behind `:kernel`. Default `make-vm` still uses Lisp `exec-trap`, faults on bit 63, and ignores privileged `PUT` | `rT` / `rTT`, `rK`/`rQ`, `rwxnkbsp`, `RESUME 1`, kernel ROM for MMIX-SIM |
 | [06](plans/06-virtual-memory.md) | `rV` translation | Flat segments; `LDVTS` returns 0 | PTEs, PTPs, protection, translation caches, MMIO at physical `≥ 2^48` |
 | [07](plans/07-cache-and-sync.md) | Caches and `SYNC` | `PRE*`/`SYNC*`/`LDUNC`/`STUNC` are nops or plain octas | §30–31 on one processor: caches, prefetch, ordering, privileged `SYNC` |
 | [08](plans/08-timing-costs.md) | μ and υ | One counter per instruction, one per load/store | §50 costs, including mispredicted branches |
@@ -70,7 +70,7 @@ Dependency order is in the [roadmap](plans/00-roadmap.md). Plans 01, 02, 03, 08,
 
 | Bytes | Names | Fault string |
 |-------|--------|----------------|
-| `#xF9` with `Z ≠ 0` | `RESUME 1` | "RESUME with a nonzero XYZ is not implemented" |
+| `#xF9` with `Z ≠ 0` | `RESUME 1` on the default VM | "RESUME with a nonzero XYZ is not implemented" |
 
 Everything else has a handler. Several handlers are the functional single-processor approximation of an instruction whose real effect is a cache, a pipe drain, a translation cache, or a kernel entry. Those are gaps of meaning, listed below, and they are not missing names in `*op-name*`.
 
@@ -88,17 +88,19 @@ Landed as a complete image inside one `step-vm`. `SAVE $X,0` pushes locals as `p
 
 Landed. `do-trip` writes the §35 image: bit 63 of `rX` set, `rB ←` the old `$255`, `$255 ← rJ`, `rY`/`rZ` from the operands, `rW ← PC+4`. An enabled exception leaves its event bit clear. When several enables fire, the earliest bit of `D V W I O U Z X` trips and the other bits are recorded. A negative `PC` records every bit and does not trip. Store trips put the virtual address in `rY` and the octa that would have been stored in `rZ`.
 
-`RESUME 0` returns to `rW` when `rX` is negative. Otherwise it inserts the low tetra under ropcodes 0–2. Ropcode 3 and `RESUME` with `Z ≠ 0` wait for plan 05. `GET` and `PUT` with a nonzero `Y` field are illegal instructions.
+`RESUME 0` returns to `rW` when `rX` is negative. Otherwise it inserts the low tetra under ropcodes 0–2. On a kernel VM, `RESUME 1` uses the trap bank and accepts ropcode 3. The default VM still rejects a nonzero `Z`. `GET` and `PUT` with a nonzero `Y` field are illegal instructions (a halt on the default VM, the `b` bit on a kernel VM).
 
 ## Kernel, traps, and specials that stay zero
 
 ### Forced traps (§36, plan 05)
 
-An architectural `TRAP` clears `rK`, saves `rBB`, `rWW`, `rXX`, `rYY`, `rZZ`, and jumps to `rT`. `XYZ = 0` terminates the process. `XYZ = 1` asks the operating system for the default trip action. MMIX-SIM defines Y = 1…10 as file services when X = 0, and the current `exec-trap` performs those services in Lisp without ever writing `rT` or `rK`.
+An architectural `TRAP` clears `rK`, saves `rBB`, `rWW`, `rXX`, `rYY`, `rZZ`, and jumps to `rT`. `XYZ = 0` terminates the process. `XYZ = 1` asks the operating system for the default trip action. MMIX-SIM defines Y = 1…10 as file services when X = 0.
 
-A full machine keeps both facts. `TRAP` enters the kernel. A ROM at a negative address implements Halt and the file services, then `RESUME 1`. Existing user programs still see `$255` results. Tests that expect an immediate halt on `TRAP 0,0,0` keep working because the ROM halts.
+Default `make-vm` still performs those services in Lisp (`exec-trap`) and does not write `rT` or `rK`. `:kernel t` takes the forced-trap image and jumps to the ROM at `#x8000000100000000`. The ROM’s first instruction is `SWYM` `#x485354`, the host call, and only a negative PC on a kernel VM dispatches it. Halt, the trip report, and an unsupported `TRAP` stop there. A file service returns through guest `PUT rBB,$255`, an all-ones `$255`, and `RESUME 1`, so `$255` is the service result and `rK` is all ones again.
 
-Software emulation of an opcode, and software page translation, are also forced traps. The high tetra of `rXX` is `#x02000000` for an emulated operation and `#x03000000` when the handler must supply a page-table entry. `RESUME 1` with ropcode 2 or 3 finishes the instruction. Neither encoding exists today.
+`RESUME 1` from a negative address uses `rWW`/`rXX`/`rYY`/`rZZ`. Ropcodes 0 and 2 match plan 02. Ropcode 3 stores the page-table pair `(rYY, rZZ)` on the VM (`:inst` when the tetra’s opcode is `SWYM`, otherwise `:data`) for plan 06. The same `RESUME 1` from a nonnegative address sets `k` and does not resume. User mode still faults with "RESUME with a nonzero XYZ is not implemented".
+
+Software emulation of an opcode is a forced trap whose `rXX` high tetra is `#x02000000`. This plan does not raise that encoding. A translation miss (`#x03000000`, ropcode 3) is stored and not applied until plan 06.
 
 ### Dynamic traps (§37, plan 05)
 
@@ -112,7 +114,7 @@ The program byte is `rwxnkbsp`: read, write, execute, negative address, kernel-p
 
 A security violation (`s`) occurs when an instruction at a nonnegative address runs while any `rwxnkbsp` bit of `rK` is clear. The operating system is the only code that runs with interrupts suppressed, because a `TRAP` clears `rK` and only `RESUME 1` (from a negative address) reloads it from `$255`.
 
-Today bit 63 of an address signals `mmix-fault` and halts. `PUT` of `rC`, `rN`, `rO`, `rS`, `rI`, `rT`, `rTT`, `rK`, `rQ`, `rU`, `rV`, `rF`, `rBB`, `rWW`, `rXX`, `rYY`, `rZZ` returns without writing and without an interrupt (`privileged-special-p` in `src/machine.lisp`). §43 distinguishes three outcomes: a successful write, an illegal-instruction interrupt (`b`), and a privileged-operation interrupt (`k`) for `rC rI rK rQ rT rU rV rTT` when the privilege bit of `rK` is set. `rN`, `rO`, and `rS` are never writable. `PUT rQ` cannot clear a bit that came on after the last `GET` of `rQ`.
+On the default VM, bit 63 of an address signals `mmix-fault` and halts, and `PUT` of a privileged register returns without writing (`privileged-special-p`). A kernel VM records program bits in `rQ` and traps through `rTT` when `rQ ∧ rK ≠ 0`. `x`, `k`, and `b` suppress the instruction. A load that raises `n` yields 0. A store that raises `n` writes nothing. `PUT` of `rN`, `rO`, or `rS` sets `b`. `PUT` of `rC rI rK rQ rT rU rV rTT` from a nonnegative PC sets `k` while `rK`’s `k` bit is set; the same `PUT` from a negative PC writes, and `PUT rQ` keeps any bit that came on since the last `GET rQ`. A nonnegative PC whose `rK` is missing any `rwxnkbsp` bit sets `s` in both `rQ` and `rK`. `p` is recorded for an instruction fetched from a negative address and cleared when `RESUME 1` returns to a nonnegative `rWW`. `SYNC` with XYZ ≥ 4 sets `k`; the fence itself is plan 07.
 
 ### Machine specials (§40–42, §45, §48, plan 04)
 
@@ -123,9 +125,9 @@ Today bit 63 of an address signals `mmix-fault` and halts. `PUT` of `rC`, `rN`, 
 | `rU` | Usage pattern, mask, and 47-bit count of retired opcodes that match | Counts after each retirement. Bit 47 is the negative-address flag |
 | `rC` | Physical continuation page, PTE-shaped, used when a register-stack spill would fault | Raw octa, not interpreted. `PUT` ignored |
 | `rF` | Physical address of a memory fault (parity and similar), often unrelated to `rW` | Page-budget failure stores the refused page base |
-| `rK` | Interrupt mask. Cleared by `TRAP`. User programs need it all-ones to avoid an `s` trap | 0, ignored |
-| `rQ` | Interrupt requests | Bit 6 can be set by `rI`. `PUT` ignored. No dynamic trap |
-| `rT`, `rTT` | Forced-trap and dynamic-trap entry | 0 |
+| `rK` | Interrupt mask. Cleared by `TRAP`. User programs need it all-ones to avoid an `s` trap | 0 and ignored on the default VM. `:kernel t` starts at all ones and clears it on trap entry |
+| `rQ` | Interrupt requests | Bit 6 can be set by `rI`. Default `PUT` is ignored. A kernel VM traps through `rTT` when `rQ ∧ rK ≠ 0` |
+| `rT`, `rTT` | Forced-trap and dynamic-trap entry | 0 on the default VM. `:kernel t` sets both to the ROM entry |
 | `rV` | Page-table root, page size, address-space number, software-translation flag | 0 |
 
 The local-register ring in §42 (256, 512, or 1024 locals, pointers α, β, γ derived from `rO`, `rS`, and `rL`) is an implementation of the same stack the Lisp vector already exposes to `PUSH`/`POP`. It becomes observable when a spill or a `SAVE` is interrupted, and when `rS` walks into a page the process cannot write. That behavior belongs with plans 03, 04, and 06, not with a second register file hidden beside a correct `POP`.

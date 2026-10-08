@@ -235,9 +235,17 @@
           (ash (inst-y inst) 8)
           (inst-z inst)))
 
+;;; Defined in src/kernel.lisp. Returns (values tetra t) on a ROM hit.
+(declaim (ftype (function (t t) (values t t &optional)) rom-tetra))
+
 (defun fetch (vm)
-  "Fetch the tetrabyte at PC, ignoring the low two bits. Does not advance PC."
-  (mem-ref-u32 vm (logand (vm-pc vm) (lognot 3)) :internal t))
+  "Fetch the tetrabyte at PC, ignoring the low two bits. Does not advance PC.
+A kernel VM reads its ROM instead of vm-memory when PC is inside that image."
+  (let ((addr (logand (vm-pc vm) (lognot 3))))
+    (multiple-value-bind (word hit) (rom-tetra vm addr)
+      (if hit
+          word
+          (mem-ref-u32 vm addr :internal t)))))
 
 (defun relative-disp (field bits backward)
   (if backward (- field (ash 1 bits)) field))

@@ -57,6 +57,17 @@
 (defconstant +ev-z+ #x02)
 (defconstant +ev-x+ #x01)
 
+;;; rQ program byte rwxnkbsp, bits 39–32. Machine bit 6 (interval) stays #x40.
+(defconstant +rq-r+ (ash #x80 32))
+(defconstant +rq-w+ (ash #x40 32))
+(defconstant +rq-x+ (ash #x20 32))
+(defconstant +rq-n+ (ash #x10 32))
+(defconstant +rq-k+ (ash #x08 32))
+(defconstant +rq-b+ (ash #x04 32))
+(defconstant +rq-s+ (ash #x02 32))
+(defconstant +rq-p+ (ash #x01 32))
+(defconstant +rq-prog+ (ash #xFF 32))
+
 (defconstant +text-segment+  #x0000000000000000)
 (defconstant +data-segment+  #x2000000000000000)
 (defconstant +pool-segment+  #x4000000000000000)
@@ -76,9 +87,20 @@
   ((reason :initarg :reason :reader mmix-fault-reason))
   (:report (lambda (c s) (format s "MMIX fault: ~A" (mmix-fault-reason c)))))
 
+(define-condition mmix-suppress (error)
+  ((bit :initarg :bit :reader mmix-suppress-bit))
+  (:report (lambda (c s)
+             (format s "MMIX suppress: program bit #x~X" (mmix-suppress-bit c)))))
+
+(defvar *exec-vm* nil
+  "VM bound by EXECUTE. Illegal fields consult it to choose a halt or the b bit.")
+
 (defun illegal-instruction ()
-  "The b condition. Until plan 05 this halts with vm-fault."
-  (error 'mmix-fault :reason "illegal instruction"))
+  "The b condition. User mode halts. A kernel VM records b and suppresses the instruction."
+  (let ((vm *exec-vm*))
+    (if (and vm (vm-kernel vm))
+        (error 'mmix-suppress :bit +rq-b+)
+        (error 'mmix-fault :reason "illegal instruction"))))
 
 (defstruct fio
   kind
@@ -121,24 +143,38 @@
   (labels (make-hash-table :test 'equal) :type hash-table)
   (symbols nil)
   (lines (make-hash-table :test 'eql) :type hash-table)
-  (legacy-putchar nil :type boolean))
+  (legacy-putchar nil :type boolean)
+  (kernel nil :type boolean)
+  (rom nil)
+  (rom-base 0 :type (unsigned-byte 64))
+  (rq-gotten 0 :type (unsigned-byte 64))
+  (trans-cache nil)
+  (trans-va 0 :type (unsigned-byte 64))
+  (trans-pte 0 :type (unsigned-byte 64)))
 
-(defun make-vm (&key (memory-size #x2000000) (pc 0) input legacy-putchar)
-  "Create a user-mode MMIX VM.
+;;; Defined in src/kernel.lisp.
+(declaim (ftype (function (t) t) install-kernel))
+
+(defun make-vm (&key (memory-size #x2000000) (pc 0) input legacy-putchar kernel)
+  "Create an MMIX VM. Without :KERNEL this is the user-mode interpreter.
 MEMORY-SIZE is the grow-on-touch page budget in bytes (at least one page).
 General registers use the rL/rG window; rG starts at 255 and rL at 0.
-The register stack is rooted at Stack_Segment."
+The register stack is rooted at Stack_Segment.
+:KERNEL installs the trap ROM, sets rT and rTT to its entry, and sets rK to all ones."
   (unless (and (integerp memory-size) (plusp memory-size))
     (error "memory-size must be a positive integer"))
   (let ((vm (%make-vm
              :mem-limit (max memory-size +page-size+)
              :pc (u64 pc)
              :input input
-             :legacy-putchar (and legacy-putchar t))))
+             :legacy-putchar (and legacy-putchar t)
+             :kernel (and kernel t))))
     (set-special vm +r-g+ 255)
     (stamp-serial vm)
     (sync-stack vm)
     (init-files vm)
+    (when kernel
+      (install-kernel vm))
     vm))
 
 (defun init-files (vm)
@@ -168,6 +204,14 @@ The register stack is rooted at Stack_Segment."
       (fill (vm-special vm) 0)
       (set-special vm +r-g+ 255)
       (set-special vm +r-n+ serial)
+      (setf (vm-rq-gotten vm) 0
+            (vm-trans-cache vm) nil
+            (vm-trans-va vm) 0
+            (vm-trans-pte vm) 0)
+      (when (vm-kernel vm)
+        (set-special vm +r-t+ (vm-rom-base vm))
+        (set-special vm +r-tt+ (vm-rom-base vm))
+        (set-special vm +r-k+ #xffffffffffffffff))
       (init-files vm)))
   (when clear-memory
     (clrhash (vm-memory vm))
@@ -209,7 +253,8 @@ Unix time at which this VM was created. Later PUT and reset-vm leave it."
 
 (defun tick-interval (vm)
   "One retired instruction. rI counts down; the step from 1 to 0 sets rQ bit 6.
-Until plan 08 a tick is one instruction, not one υ. The bit does not trap yet."
+Until plan 08 a tick is one instruction, not one υ. A kernel VM whose rK
+unmasks that bit takes a dynamic trap on the following step-vm."
   (let ((ri (special-reg vm +r-i+)))
     (when (plusp ri)
       (let ((next (1- ri)))
@@ -282,13 +327,27 @@ that retires; an instruction inserted by RESUME is part of that RESUME."
                           :element-type '(unsigned-byte 8)
                           :initial-element 0)))))
 
+(defun raise-program-bit (vm bit)
+  (set-special vm +r-q+ (logior (special-reg vm +r-q+) bit)))
+
 (defun %byte (vm addr &optional (value nil write-p))
-  (let ((addr (user-addr addr)))
-    (multiple-value-bind (page off) (floor addr +page-size+)
-      (let ((arr (ensure-page vm page write-p)))
-        (cond (write-p (setf (aref arr off) (u8 value)))
-              (arr (aref arr off))
-              (t 0))))))
+  (let ((addr (u64 addr)))
+    ;; A nonnegative instruction that names a negative address sets n.
+    ;; The load yields 0 and the store writes nothing. Kernel instructions
+    ;; (negative PC) map by clearing bit 63. User mode still faults.
+    (when (and (vm-kernel vm)
+               (logbitp 63 addr)
+               (not (logbitp 63 (vm-pc vm))))
+      (raise-program-bit vm +rq-n+)
+      (return-from %byte 0))
+    (let ((addr (if (and (vm-kernel vm) (logbitp 63 addr))
+                    (logand addr #x7fffffffffffffff)
+                    (user-addr addr))))
+      (multiple-value-bind (page off) (floor addr +page-size+)
+        (let ((arr (ensure-page vm page write-p)))
+          (cond (write-p (setf (aref arr off) (u8 value)))
+                (arr (aref arr off))
+                (t 0)))))))
 
 (defun note-watch (vm addr kind)
   (dolist (w (vm-watches vm))
@@ -598,9 +657,40 @@ address of the first saved local. One step-vm, same plan 05 hook as SAVE."
 (defun privileged-special-p (n)
   (member n '(8 9 10 11 12 13 14 15 16 17 18 22 7 28 29 30 31)))
 
+(defun k-special-p (n)
+  "PUT of these from user space sets k while rK's k bit is set."
+  (member n '(8 12 13 14 15 16 17 18)))
+
+(defun b-special-p (n)
+  "rN, rO, and rS are never writable."
+  (member n '(9 10 11)))
+
+(defun put-rq (vm value)
+  "PUT rQ. Bits that came on since the last GET rQ stay set."
+  (let* ((cur (special-reg vm +r-q+))
+         (sticky (logandc2 cur (vm-rq-gotten vm))))
+    (set-special vm +r-q+
+                 (logior (logand (u64 value) (lognot sticky)) sticky))))
+
 (defun put-special (vm n value)
-  "PUT rules from mmix-doc §43. Privileged registers are left unchanged."
+  "PUT rules from mmix-doc §43. User mode leaves privileged registers unchanged.
+A kernel VM raises b for rN/rO/rS, raises k for the privileged group while
+the k bit of rK is set at a nonnegative PC, and writes the bootstrap
+registers from a negative PC."
   (cond
+    ((and (vm-kernel vm) (b-special-p n))
+     (error 'mmix-suppress :bit +rq-b+))
+    ((and (vm-kernel vm) (k-special-p n))
+     (if (and (logtest (special-reg vm +r-k+) +rq-k+)
+              (not (logbitp 63 (vm-pc vm))))
+         (error 'mmix-suppress :bit +rq-k+)
+         (if (= n +r-q+)
+             (put-rq vm value)
+             (set-special vm n (u64 value)))))
+    ((and (vm-kernel vm)
+          (logbitp 63 (vm-pc vm))
+          (member n '(7 22 28 29 30 31)))
+     (set-special vm n (u64 value)))
     ((privileged-special-p n) nil)
     ((= n +r-a+)
      (set-special vm +r-a+ (logand (u64 value) #x3ffff)))

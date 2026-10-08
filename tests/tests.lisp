@@ -926,6 +926,239 @@
          (list nil (logior #x8000000000000000 32) #x4040
                nil (logior #x8000000000000000 32)))
 
+  ;; --- Kernel traps (plan 05). Default make-vm stays on the Lisp path. ---
+  (check user-trap-skips-kernel
+         (let ((vm (make-vm)))
+           (assemble-into vm
+             '(program (:org #x100)
+               (seth $255 #x2000)
+               (trap 0 7 1)
+               (trap 0 0 0)
+               (:org #x2000000000000000)
+               (:zstring "HI")))
+           (run-vm vm)
+           (list (coerce (vm-output vm) 'string)
+                 (reg vm 255)
+                 (special-reg vm cl-mmix::+r-t+)
+                 (special-reg vm cl-mmix::+r-k+)
+                 (vm-halted vm)
+                 (vm-fault vm)
+                 (vm-exit-code vm)))
+         (list "HI" 2 0 0 t nil 2))
+
+  (check user-kernel-address-faults
+         (let ((vm (make-vm)))
+           (assemble-into vm '(program (:org 0) (ldou $1 $2 $3) (trap 0 0 0)))
+           (set-reg vm 2 #x8000000000000000)
+           (run-vm vm)
+           (list (and (search "kernel address" (or (vm-fault vm) "")) t)
+                 (vm-halted vm)
+                 (reg vm 1)))
+         (list t t 0))
+
+  (check kernel-fputs
+         (let ((vm (make-vm :kernel t)))
+           (assemble-into vm
+             '(program (:org #x100)
+               (seth $255 #x2000)
+               (trap 0 7 1)
+               (trap 0 0 0)
+               (:org #x2000000000000000)
+               (:zstring "HI")))
+           (breakpoint vm #x108)
+           (run-vm vm)
+           (list (coerce (vm-output vm) 'string)
+                 (reg vm 255)
+                 (special-reg vm cl-mmix::+r-k+)
+                 (vm-pc vm)
+                 (and (vm-break vm) t)
+                 (vm-halted vm)
+                 (vm-fault vm)))
+         (list "HI" 2 #xFFFFFFFFFFFFFFFF #x108 t nil nil))
+
+  (check kernel-fputs-halts
+         (let ((vm (make-vm :kernel t)))
+           (assemble-into vm
+             '(program (:org #x100)
+               (seth $255 #x2000)
+               (trap 0 7 1)
+               (trap 0 0 0)
+               (:org #x2000000000000000)
+               (:zstring "HI")))
+           (run-vm vm)
+           (list (coerce (vm-output vm) 'string)
+                 (vm-exit-code vm)
+                 (vm-halted vm)
+                 (vm-fault vm)
+                 (special-reg vm cl-mmix::+r-t+)))
+         (list "HI" 2 t nil #x8000000100000000))
+
+  (check kernel-halt
+         (let ((vm (make-vm :kernel t)))
+           (assemble-into vm '(program (:org #x100) (trap 0 0 0)))
+           (set-reg vm 255 42)
+           (run-vm vm)
+           (list (vm-exit-code vm) (vm-halted vm) (vm-fault vm)))
+         (list 42 t nil))
+
+  (check kernel-trip-trap
+         (let ((vm (make-vm :kernel t)))
+           (assemble-into vm '(program (:org #x100) (trap 0 0 1)))
+           (run-vm vm)
+           (list (vm-halted vm) (vm-fault vm)))
+         (list t "TRAP 0,0,1 (no kernel to service the trip)"))
+
+  (check kernel-unsupported-trap
+         (let ((vm (make-vm :kernel t)))
+           (assemble-into vm '(program (:org #x100) (trap 1 2 3)))
+           (run-vm vm)
+           (list (vm-halted vm) (vm-fault vm)))
+         (list t "unsupported TRAP 1,2,3"))
+
+  (check kernel-put-rk-user
+         (let ((vm (make-vm :kernel t)))
+           (assemble-into vm '(program (:org #x100) (put rk $1)))
+           (set-reg vm 1 #x11)
+           (step-vm vm)
+           (list (special-reg vm cl-mmix::+r-k+)
+                 (logand (special-reg vm cl-mmix::+r-q+) cl-mmix::+rq-k+)
+                 (vm-pc vm)
+                 (vm-halted vm)
+                 (vm-fault vm)))
+         (list #xFFFFFFFFFFFFFFFF cl-mmix::+rq-k+ #x100 nil nil))
+
+  (check kernel-put-rk-rom
+         (let ((vm (make-vm :kernel t)))
+           (assemble-into vm '(program (:org #x200) (put rk $1)))
+           (set-reg vm 1 #xABC)
+           (setf (vm-pc vm) (logior #x8000000000000000 #x200))
+           (step-vm vm)
+           (list (special-reg vm cl-mmix::+r-k+)
+                 (vm-halted vm)
+                 (vm-fault vm)))
+         (list #xABC nil nil))
+
+  (check kernel-dynamic-trap
+         (let ((vm (make-vm :kernel t)))
+           (assemble-into vm '(program (:org #x100) (setl $1 1)))
+           (set-special vm cl-mmix::+r-q+ cl-mmix::+rq-k+)
+           (step-vm vm)
+           (list (vm-pc vm)
+                 (reg vm 1)
+                 (special-reg vm cl-mmix::+r-k+)
+                 (special-reg vm cl-mmix::+r-ww+)))
+         (list #x8000000100000000 0 0 #x100))
+
+  (check kernel-resume-user-pc
+         (let ((vm (make-vm :kernel t)))
+           (assemble-into vm '(program (:org #x100) (resume 1)))
+           (set-special vm cl-mmix::+r-ww+ #x40)
+           (step-vm vm)
+           (list (vm-pc vm)
+                 (logand (special-reg vm cl-mmix::+r-q+) cl-mmix::+rq-k+)
+                 (vm-halted vm)
+                 (vm-fault vm)))
+         (list #x100 cl-mmix::+rq-k+ nil nil))
+
+  (check kernel-negative-load
+         (let ((vm (make-vm :kernel t)))
+           (assemble-into vm '(program (:org #x100) (ldou $1 $2 $3)))
+           (set-reg vm 2 #x8000000000000300)
+           (mem-set-u64 vm #x300 #x1111)
+           (step-vm vm)
+           (list (reg vm 1)
+                 (logand (special-reg vm cl-mmix::+r-q+) cl-mmix::+rq-n+)
+                 (vm-pc vm)
+                 (vm-halted vm)))
+         (list 0 cl-mmix::+rq-n+ #x104 nil))
+
+  (check kernel-negative-store
+         (let ((vm (make-vm :kernel t)))
+           (assemble-into vm '(program (:org #x100) (stou $4 $5 $6)))
+           (set-reg vm 4 #x99)
+           (set-reg vm 5 #x8000000000000300)
+           (mem-set-u64 vm #x300 #x1111)
+           (step-vm vm)
+           (list (mem-ref-u64 vm #x300)
+                 (logand (special-reg vm cl-mmix::+r-q+) cl-mmix::+rq-n+)
+                 (vm-pc vm)))
+         (list #x1111 cl-mmix::+rq-n+ #x104))
+
+  (check kernel-ropcode-3
+         (let ((inst (make-vm :kernel t))
+               (data (make-vm :kernel t)))
+           (flet ((arm (vm xx)
+                    (assemble-into vm '(program (:org #x400) (resume 1)))
+                    (setf (vm-pc vm) (logior #x8000000000000000 #x400))
+                    (set-special vm cl-mmix::+r-ww+ #x80)
+                    (set-special vm cl-mmix::+r-xx+ xx)
+                    (set-special vm cl-mmix::+r-yy+ #x2000)
+                    (set-special vm cl-mmix::+r-zz+ #x55)
+                    (set-reg vm 255 #xFFFFFFFFFFFFFFFF)
+                    (set-special vm cl-mmix::+r-bb+ 7)
+                    (step-vm vm)))
+             (arm inst (logior (ash 3 56) (cl-mmix::encode :swym 0 0 0)))
+             (arm data (logior (ash 3 56) (cl-mmix::encode :add 0 0 0)))
+             (list (cl-mmix::vm-trans-cache inst)
+                   (cl-mmix::vm-trans-va inst)
+                   (cl-mmix::vm-trans-pte inst)
+                   (vm-pc inst)
+                   (special-reg inst cl-mmix::+r-k+)
+                   (reg inst 255)
+                   (cl-mmix::vm-trans-cache data)
+                   (logand (special-reg inst cl-mmix::+r-q+) cl-mmix::+rq-p+))))
+         (list :inst #x2000 #x55 #x80 #xFFFFFFFFFFFFFFFF 7 :data 0))
+
+  (check kernel-resume-bad-z
+         (let ((vm (make-vm :kernel t)))
+           (assemble-into vm '(program (:org #x400) (resume 2)))
+           (setf (vm-pc vm) (logior #x8000000000000000 #x400))
+           (set-special vm cl-mmix::+r-ww+ #x80)
+           (step-vm vm)
+           (list (vm-pc vm)
+                 (logand (special-reg vm cl-mmix::+r-q+) cl-mmix::+rq-b+)
+                 (special-reg vm cl-mmix::+r-k+)
+                 (vm-fault vm)))
+         (list (logior #x8000000000000000 #x400)
+               cl-mmix::+rq-b+
+               #xFFFFFFFFFFFFFFFF
+               nil))
+
+  (check kernel-put-rq-sticky
+         (let ((vm (make-vm :kernel t)))
+           (assemble-into vm
+             '(program (:org #x500)
+               (get $1 rq)
+               (put rq $2)))
+           (setf (vm-pc vm) (logior #x8000000000000000 #x500))
+           ;; rK is 0 while the kernel itself runs, so the preset rQ bit
+           ;; does not take a dynamic trap before the GET.
+           (set-special vm cl-mmix::+r-k+ 0)
+           (set-special vm cl-mmix::+r-q+ cl-mmix::+rq-k+)
+           (step-vm vm)
+           (set-special vm cl-mmix::+r-q+
+                        (logior cl-mmix::+rq-k+ cl-mmix::+rq-n+))
+           (set-reg vm 2 0)
+           (step-vm vm)
+           (list (reg vm 1)
+                 (special-reg vm cl-mmix::+r-q+)))
+         (list (logior cl-mmix::+rq-k+ cl-mmix::+rq-p+)
+               cl-mmix::+rq-n+))
+
+  (check kernel-sync-k
+         (let ((hi (make-vm :kernel t))
+               (lo (make-vm :kernel t)))
+           (assemble-into hi '(program (:org #x100) (sync 4)))
+           (assemble-into lo '(program (:org #x100) (sync 3)))
+           (step-vm hi)
+           (step-vm lo)
+           (list (logand (special-reg hi cl-mmix::+r-q+) cl-mmix::+rq-k+)
+                 (vm-pc hi)
+                 (logand (special-reg lo cl-mmix::+r-q+) cl-mmix::+rq-k+)
+                 (vm-pc lo)
+                 (vm-fault hi)))
+         (list cl-mmix::+rq-k+ #x100 0 #x104 nil))
+
   ;; --- MMIX-SIM traps ---
   (check fopen-refuses-stdio
          (let ((vm (run-forms '((trap 0 1 1)))))

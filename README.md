@@ -92,7 +92,7 @@ sbcl --load scripts/run-demo.lisp
 | Pool | `#x4000000000000000` |
 | Stack | `#x6000000000000000` |
 
-Bit 63 is a kernel address: the instruction stops, `vm-fault` is set, and the machine halts. Pages are allocated on the first write. `(mem-size vm)` is the budget in bytes, rounded up to a page. `(vm-memory vm)` is the page table, a hash table of 4096-byte vectors, not a flat octet vector.
+On the default VM, bit 63 is a kernel address: the instruction stops, `vm-fault` is set, and the machine halts. `:kernel t` maps that address from kernel code by clearing bit 63, and a user instruction that names one sets `n` instead of halting. Pages are allocated on the first write. `(mem-size vm)` is the budget in bytes, rounded up to a page. `(vm-memory vm)` is the page table, a hash table of 4096-byte vectors, not a flat octet vector.
 
 The hidden register stack is a Lisp vector. `rO` and `rS` stay consistent with `Stack_Segment + 8*tau`, and each push is also written into the stack segment.
 
@@ -104,7 +104,7 @@ The hidden register stack is a Lisp vector. `rO` and `rS` stay consistent with `
 
 ## TRAP (MMIX-SIM)
 
-`$255` is the argument or the result. `Y` selects the operation:
+`$255` is the argument or the result. `Y` selects the operation. The default VM performs the call in Lisp. `(make-vm :kernel t)` enters a ROM at `rT` and returns through `RESUME 1`, with the same `$255` result.
 
 | Y | Operation |
 |---|-----------|
@@ -182,8 +182,8 @@ sbcl --script tests/run-tests.lisp
 
 [docs/TAOCP-GAP-ANALYSIS.md](docs/TAOCP-GAP-ANALYSIS.md) is the gap between this tree and a full machine (kernel, remaining opcodes, virtual memory, pipeline, and multi-core). [docs/plans/00-roadmap.md](docs/plans/00-roadmap.md) is the order of work. The largest holes:
 
-- No `rV` page tables, no dynamic traps, no pipeline, no `υ`/`μ` counts beyond a simple `mems` counter.
-- `RESUME 1` (`Z ≠ 0`) is not implemented. `RESUME 0` inserts ropcodes 0–2.
+- No `rV` page tables, no pipeline, no `υ`/`μ` counts beyond a simple `mems` counter. Dynamic traps and `RESUME 1` run when `make-vm` is called with `:kernel t`. The default VM still has neither, and bit 63 of an address still faults there.
+- `RESUME 1` (`Z ≠ 0`) on the default VM is still the unimplemented path. `RESUME 0` inserts ropcodes 0–2.
 - `SWYM` does not halt. `PRE*`/`SYNC*`/`SYNCD`/`SYNCID` are no-ops. `LDUNC`/`STUNC` are ordinary octa accesses. `LDVTS` returns 0.
 - `Fopen` text and binary modes are not newline-translated.
 

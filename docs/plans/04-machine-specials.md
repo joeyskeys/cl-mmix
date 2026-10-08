@@ -59,4 +59,4 @@ The 32 specials are a vector of zeros (`src/machine.lisp`). `PUT` ignores number
 
 ## Follow-ons
 
-Plan 05 delivers the interval bit through `rTT` when `rK` unmasks it. Plan 08 may redefine one `rI` tick as one υ. Plan 06 uses `rC` when a stack spill touches a page without write permission.
+Plan 05 delivers the interval bit: a kernel VM whose `rK` unmasks `rQ` bit 6 traps through `rTT` on the next `step-vm`. Plan 08 may redefine one `rI` tick as one υ. Plan 06 uses `rC` when a stack spill touches a page without write permission.

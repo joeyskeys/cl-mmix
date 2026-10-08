@@ -12,7 +12,7 @@ The gap catalog is [../TAOCP-GAP-ANALYSIS.md](../TAOCP-GAP-ANALYSIS.md). The beh
 | 4 | [03 SAVE and UNSAVE](03-save-unsave.md) | Landed. Full §43 image in one step; interruptible spill is plan 05 | Process images, and the MMIX-SIM startup prelude |
 | 5 | [04 Machine specials](04-machine-specials.md) | Landed. `rN` frozen, `rI`/`rU` count retired instructions, `rF` records a refused page | Interval delivery through `rTT` is plan 05 |
 | 6 | [09 MMIXAL](09-mmixal.md) | Current assembler and `.mmo` loader | `.mms` in process |
-| 7 | [05 Kernel traps](05-kernel-traps.md) | Plans 02 and 03 | `TRAP` through `rT`, `RESUME 1`, dynamic `rQ` |
+| 7 | [05 Kernel traps](05-kernel-traps.md) | Landed. `:kernel t` enters `rT`/`rTT`; default `make-vm` stays on Lisp `exec-trap` | Virtual memory, argv, cross-core `rQ` |
 | 8 | [10 Simulator session](10-simulator-session.md) | Plans 03, 05, and 08 | argv, text newlines, `mmix>` commands, profile |
 | 9 | [06 Virtual memory](06-virtual-memory.md) | Plan 05 | `rV`, protection faults, `LDVTS`, MMIO |
 | 10 | [07 Caches and SYNC](07-cache-and-sync.md) | Plan 06 for negative-address variants; fences can be drafted earlier | One-processor memory order |
@@ -23,7 +23,7 @@ Plans 08 and 09 do not wait on plan 01. They sit where they do so the integer ma
 
 ## Rules for every plan
 
-- Default `make-vm` keeps the current user-mode results: four segments, MMIX-SIM `TRAP` visible as today’s `$255` behavior, bit 63 still a fault until plan 05 replaces that path behind a switch.
+- Default `make-vm` keeps the user-mode results: four segments, MMIX-SIM `TRAP` visible as today’s `$255` behavior, and bit 63 still a fault. `:kernel t` is the switch that enters the ROM instead.
 - New machinery is reached by an explicit keyword (`:kernel`, `:virtual-memory`, `:pipeline`, `:cores`) or by a new constructor. Turning the default over is a separate, last commit inside that plan, after the old tests pass both ways.
 - `PUT` restrictions, once plan 05 lands, signal an interrupt on the kernel path and remain silent no-ops on the user-mode path so existing tests stay valid.
 - Opcode names stay in `src/decode.lisp`. Plans add execution. They do not renumber bytes.

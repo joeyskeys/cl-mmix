@@ -22,6 +22,8 @@
                  (:file "trap")
                  (:file "ops")
                  (:file "asm")
+                 ;; After the assembler: the trap ROM is an assembled tetra image.
+                 (:file "kernel")
                  (:file "mmo")
                  (:file "api"))))
   :in-order-to ((test-op (test-op "cl-mmix/tests"))))

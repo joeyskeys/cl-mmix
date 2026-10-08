@@ -362,10 +362,11 @@
      (setf (vm-pc vm) rw)
      :jump)))
 
-(defun exec-inserted (vm tetra rop)
-  "Execute TETRA as though it occupied rW−4. ROP 1 substitutes rY and rZ."
+(defun exec-inserted (vm tetra rop &optional (w-reg +r-w+) (y-reg +r-y+) (z-reg +r-z+))
+  "Execute TETRA as though it occupied the resume address minus 4.
+ROP 1 substitutes the Y and Z registers of this resume bank."
   (let ((inst (decode tetra))
-        (rw (special-reg vm +r-w+)))
+        (rw (special-reg vm w-reg)))
     (when (and (= rop 1)
                (or (not (rop-nybble-ok-p (inst-op inst)))
                    (marginal-reg-p vm (inst-x inst))))
@@ -376,20 +377,20 @@
     (finish-inserted
      vm rw
      (if (= rop 1)
-         (let ((*yz-override* (cons (special-reg vm +r-y+)
-                                    (special-reg vm +r-z+))))
+         (let ((*yz-override* (cons (special-reg vm y-reg)
+                                    (special-reg vm z-reg))))
            (execute vm inst))
          (execute vm inst)))))
 
-(defun exec-resume-set (vm rx)
+(defun exec-resume-set (vm rx &optional (w-reg +r-w+) (y-reg +r-y+) (z-reg +r-z+))
   "Ropcode 2: $X ← rZ, then raise the exception bits in bits 47–40 of rX.
-$X must not be marginal. An enabled bit trips from rW−4."
+$X must not be marginal. An enabled bit trips from the resume address minus 4."
   (let* ((tetra (logand rx #xffffffff))
          (x (ldb (byte 8 16) tetra))
          (bits (suppress-exact-underflow vm (logand (ash rx -40) #xff)))
-         (ry (special-reg vm +r-y+))
-         (rz (special-reg vm +r-z+))
-         (rw (special-reg vm +r-w+)))
+         (ry (special-reg vm y-reg))
+         (rz (special-reg vm z-reg))
+         (rw (special-reg vm w-reg)))
     (when (marginal-reg-p vm x)
       (illegal-instruction))
     (set-reg vm x rz)
@@ -400,31 +401,78 @@ $X must not be marginal. An enabled bit trips from rW−4."
           (setf (vm-pc vm) rw)
           :jump))))
 
-(defun exec-resume (vm inst)
-  "RESUME 0. A negative rX returns to rW. Otherwise insert rX under its ropcode.
-Z ≠ 0 is still the unimplemented RESUME 1 path. A nonzero X or Y field, a
-ropcode above 2, and ropcode 3 are illegal."
+(defun apply-resume-rop (vm rx w-reg y-reg z-reg &key allow-rop3)
+  "Negative RX jumps to the resume address. Otherwise insert under the ropcode.
+Ropcode 3 is the page-table pair, and only RESUME 1 accepts it."
+  (if (logbitp 63 rx)
+      (progn
+        (setf (vm-pc vm) (special-reg vm w-reg))
+        :jump)
+      (case (ldb (byte 8 56) rx)
+        (0 (exec-inserted vm (logand rx #xffffffff) 0 w-reg y-reg z-reg))
+        (1 (exec-inserted vm (logand rx #xffffffff) 1 w-reg y-reg z-reg))
+        (2 (exec-resume-set vm rx w-reg y-reg z-reg))
+        (3 (if allow-rop3
+               (progn
+                 (setf (vm-trans-cache vm)
+                       (if (= (ldb (byte 8 24) rx) #xFD) :inst :data)
+                       (vm-trans-va vm) (special-reg vm y-reg)
+                       (vm-trans-pte vm) (special-reg vm z-reg)
+                       (vm-pc vm) (special-reg vm w-reg))
+                 :jump)
+               (illegal-instruction)))
+        (t (illegal-instruction)))))
+
+(defun finish-resume-1 (vm effect)
+  "rK ← $255 and $255 ← rBB. A return to a nonnegative rWW drops the p bit,
+which the handler's own fetches recorded."
+  (set-special vm +r-k+ (reg vm 255))
+  (set-reg vm 255 (special-reg vm +r-bb+))
+  (unless (logbitp 63 (special-reg vm +r-ww+))
+    (set-special vm +r-q+ (logandc2 (special-reg vm +r-q+) +rq-p+)))
+  effect)
+
+(defun exec-resume-1 (vm inst)
+  "RESUME from the trap bank. Z = 1 at a negative PC. Z > 1 sets b.
+The same instruction at a nonnegative PC sets k and does not resume."
   (cond
+    ((or (plusp (inst-x inst))
+         (plusp (inst-y inst))
+         (> (inst-z inst) 1))
+     (illegal-instruction))
+    ((not (logbitp 63 (vm-pc vm)))
+     (error 'mmix-suppress :bit +rq-k+))
+    (t
+     (finish-resume-1
+      vm
+      (apply-resume-rop vm (special-reg vm +r-xx+)
+                        +r-ww+ +r-yy+ +r-zz+
+                        :allow-rop3 t)))))
+
+(defun exec-resume (vm inst)
+  "RESUME. Z = 0 uses rW/rX/rY/rZ. On a kernel VM, Z = 1 uses the trap bank.
+User mode still rejects a nonzero Z as unimplemented. A nonzero X or Y field,
+a ropcode above 3, and ropcode 3 on RESUME 0 are illegal."
+  (cond
+    ((and (vm-kernel vm) (plusp (inst-z inst)))
+     (exec-resume-1 vm inst))
     ((not (zerop (inst-z inst)))
      (unimplemented "RESUME with a nonzero XYZ"))
     ((or (not (zerop (inst-x inst)))
          (not (zerop (inst-y inst))))
      (illegal-instruction))
     (t
-     (let ((rx (special-reg vm +r-x+)))
-       (if (logbitp 63 rx)
-           (progn
-             (setf (vm-pc vm) (special-reg vm +r-w+))
-             :jump)
-           (case (ldb (byte 8 56) rx)
-             (0 (exec-inserted vm (logand rx #xffffffff) 0))
-             (1 (exec-inserted vm (logand rx #xffffffff) 1))
-             (2 (exec-resume-set vm rx))
-             (t (illegal-instruction))))))))
+     (apply-resume-rop vm (special-reg vm +r-x+) +r-w+ +r-y+ +r-z+))))
+
+;;; Defined in src/kernel.lisp. The ftypes stay broad so a later definition
+;;; may return true; a stub that returned NIL made SBCL reject that.
+(declaim (ftype (function (t t) t) host-swym-p)
+         (ftype (function (t) t) host-dispatch deliver-dynamic-trap))
 
 (defun execute (vm inst)
   "Execute one instruction. Returns :JUMP, :STOP, or NIL (fall through)."
-  (let ((op (inst-op inst)))
+  (let ((*exec-vm* vm)
+        (op (inst-op inst)))
     (cond
       ((= op #x00) (exec-trap vm inst))
       ((<= #x01 op #x17) (exec-float vm inst))
@@ -464,10 +512,20 @@ ropcode above 2, and ropcode 3 are illegal."
          (illegal-instruction))
        (unsave-context vm (reg vm (inst-z inst)))
        nil)
-      ((or (= op #xFC) (= op #xFD)) nil)
+      ((= op #xFC)
+       (when (and (vm-kernel vm) (>= (inst-xyz inst) 4))
+         (error 'mmix-suppress :bit +rq-k+))
+       nil)
+      ((= op #xFD)
+       (if (host-swym-p vm inst)
+           (host-dispatch vm)
+           nil))
       ((= op #xFE)
        (unless (zerop (inst-y inst)) (illegal-instruction))
-       (set-reg vm (inst-x inst) (special-reg vm (inst-z inst)))
+       (let ((z (inst-z inst)))
+         (when (and (vm-kernel vm) (= z +r-q+))
+           (setf (vm-rq-gotten vm) (special-reg vm +r-q+)))
+         (set-reg vm (inst-x inst) (special-reg vm z)))
        nil)
       ((= op #xFF)
        (if (do-trip vm 0
@@ -494,17 +552,25 @@ Calling STEP-VM again while stopped executes that instruction."
   (setf (vm-watch-hit vm) nil)
   ;; An execute breakpoint returned above and did not retire. rI and rU
   ;; advance only after a successful execute, beside this cycle count.
-  ;; A fault does not retire. One rI tick is one instruction until plan 08.
+  ;; A fault does not retire. A dynamic trap does not retire the user
+  ;; instruction it diverts. One rI tick is one instruction until plan 08.
   (incf (vm-cycles vm))
+  (when (deliver-dynamic-trap vm)
+    (return-from step-vm vm))
   (let ((retired-pc (vm-pc vm)))
     (handler-case
-        (let* ((word (fetch vm))
-               (inst (decode word))
-               (effect (execute vm inst)))
-          (unless (or (eq effect :jump) (eq effect :stop) (vm-halted vm))
-            (setf (vm-pc vm) (u64 (+ (vm-pc vm) 4))))
-          (note-usage vm (inst-op inst) retired-pc)
-          (tick-interval vm))
+        (progn
+          (when (and (vm-kernel vm) (logbitp 63 retired-pc))
+            (raise-program-bit vm +rq-p+))
+          (let* ((word (fetch vm))
+                 (inst (decode word))
+                 (effect (execute vm inst)))
+            (unless (or (eq effect :jump) (eq effect :stop) (vm-halted vm))
+              (setf (vm-pc vm) (u64 (+ (vm-pc vm) 4))))
+            (note-usage vm (inst-op inst) retired-pc)
+            (tick-interval vm)))
+      (mmix-suppress (c)
+        (raise-program-bit vm (mmix-suppress-bit c)))
       (mmix-fault (e)
         (setf (vm-fault vm) (mmix-fault-reason e)
               (vm-halted vm) t))))

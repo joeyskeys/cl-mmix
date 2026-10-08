@@ -441,7 +441,7 @@ ones land just after the hole, in order."
                     do (setf (aref regs dest) (aref rvs i)))
               (setf (fill-pointer stack) base)
               (set-special vm +r-l+ new-l)
-              (sync-stack vm)))))))))
+              (sync-stack vm))))))))
 
 (defvar *save-specials*
   (vector +r-b+ +r-d+ +r-e+ +r-h+ +r-j+ +r-m+

@@ -1,8 +1,8 @@
 # Current implementation
 
-This document describes the code on `main` (ASDF system `cl-mmix`, version 0.9.0). It is what the sources do today. The distance from this tree to a full machine — kernel mode, the remaining opcodes, virtual memory, a pipeline, and shared-memory multi-core — is [TAOCP-GAP-ANALYSIS.md](TAOCP-GAP-ANALYSIS.md). The order of work is [plans/00-roadmap.md](plans/00-roadmap.md).
+This document describes this tree (ASDF system `cl-mmix`, version 0.10.0). It is what the sources do today. The distance from this tree to a full machine — kernel mode, the remaining opcodes, virtual memory, a pipeline, and shared-memory multi-core — is [TAOCP-GAP-ANALYSIS.md](TAOCP-GAP-ANALYSIS.md). The order of work is [plans/00-roadmap.md](plans/00-roadmap.md).
 
-The VM is a **user-mode functional interpreter** for educational MMIXAL. Every one of the 256 opcode bytes has a name in the decoder. The integer, bitwise, load/store, branch, wyde, register-stack, and MMIX-SIM `TRAP` instructions are executed. IEEE floating point and `SAVE`/`UNSAVE` are recognized and stop the machine with `vm-fault`. There is no pipeline, no page-table `rV`, and no dynamic trap entry into a kernel.
+The VM is a **user-mode functional interpreter** for educational MMIXAL. Every one of the 256 opcode bytes has a name in the decoder. The integer, bitwise, floating-point, load/store, branch, wyde, register-stack, and MMIX-SIM `TRAP` instructions are executed. `SAVE`/`UNSAVE` are recognized and stop the machine with `vm-fault`. There is no pipeline, no page-table `rV`, and no dynamic trap entry into a kernel.
 
 ## Source map
 
@@ -14,8 +14,9 @@ ASDF loads `src/` serially, in this order:
 | `util.lisp` | 64-bit wrap, signed views, overflow, floor division, shifts, `BDIF` slices, `MOR`/`MXOR` |
 | `machine.lisp` | VM struct, special registers, the `rL`/`rG` window, sparse memory, the register stack, `PUT` rules, breakpoints, trips |
 | `decode.lisp` | The 256-opcode name table, encode/decode, fetch, disassembly |
+| `float/` | IEEE binary64 and binary32. `octa.lisp` holds the bit helpers, `pack.lisp` packs and unpacks, `arith.lisp` is the operations, `exec.lisp` dispatches opcodes and commits `rA` |
 | `trap.lisp` | MMIX-SIM `TRAP` services and the legacy putchar switch |
-| `ops.lisp` | Instruction execution and `step-vm` / `run-vm` / `continue-vm` |
+| `ops.lisp` | Instruction execution and `step-vm` / `run-vm` / `continue-vm`. Floating-point opcodes call into `float/` |
 | `asm.lisp` | S-expression assembler |
 | `mmo.lisp` | `.mmo` loader |
 | `api.lisp` | `dump-registers`, `dump-memory`, and the demos |
@@ -37,6 +38,8 @@ Operand rule used by `z-operand`:
 - An **even** opcode in a register/immediate pair reads `$Z`.
 - The **odd** opcode reads `Z` as an unsigned byte. The byte is never sign-extended.
 
+`FIX`, `FIXU`, `FSQRT`, and `FINT` do not follow that rule either: the opcode is odd and `$Z` is still a register. `Y` is a rounding byte. Only `FLOTI`, `FLOTUI`, `SFLOTI`, and `SFLOTUI` take `Z` as an unsigned byte.
+
 Branch opcodes do not follow that rule. In `#x40`–`#x5F`, `#xF0`–`#xF1`, `#xF2`–`#xF3`, and `#xF4`–`#xF5`, the odd opcode is the **backward** form. The unsigned field is `YZ` (16 bits) or `XYZ` (24 bits for `JMP`/`JMPB`). A backward displacement is `field − 2^bits`. The target is `PC + 4 * displacement`, relative to the instruction itself, not to `PC+4`.
 
 `execute` returns `:jump` when it has already set `PC`, `:stop` when a `TRAP` halted, or `nil` to fall through by 4 bytes.
@@ -50,7 +53,7 @@ Status in the table means what `execute` does today.
 | Bytes | Names | Status |
 |-------|--------|--------|
 | `#x00` | `TRAP` | Executed. See [Traps](#traps). |
-| `#x01`–`#x17` | `FCMP` `FUN` `FEQL` `FADD` `FIX` `FSUB` `FIXU` `FLOT`/`FLOTI` `FLOTU`/`FLOTUI` `SFLOT`/`SFLOTI` `SFLOTU`/`SFLOTUI` `FMUL` `FCMPE` `FUNE` `FEQLE` `FDIV` `FSQRT` `FREM` `FINT` | Not executed. `step-vm` sets `vm-fault` to "floating point is not implemented" and halts. `run-vm` does not signal a Lisp error. |
+| `#x01`–`#x17` | `FCMP` `FUN` `FEQL` `FADD` `FIX` `FSUB` `FIXU` `FLOT`/`FLOTI` `FLOTU`/`FLOTUI` `SFLOT`/`SFLOTI` `SFLOTU`/`SFLOTUI` `FMUL` `FCMPE` `FUNE` `FEQLE` `FDIV` `FSQRT` `FREM` `FINT` | Executed. Binary64 bit patterns, four rounding modes, events `W I O U Z X`. See [Floating point](#floating-point). |
 | `#x18`–`#x1F` | `MUL`/`MULI` `MULU`/`MULUI` `DIV`/`DIVI` `DIVU`/`DIVUI` | Executed. See [Arithmetic](#arithmetic). |
 | `#x20`–`#x2F` | `ADD`/`ADDI` `ADDU`/`ADDUI` `SUB`/`SUBI` `SUBU`/`SUBUI` `2ADDU` `4ADDU` `8ADDU` `16ADDU` and the `I` forms | Executed. Scaled `nADDU` is `($Y << k) + Z` for `k` in {1,2,3,4}. |
 | `#x30`–`#x37` | `CMP`/`CMPI` `CMPU`/`CMPUI` `NEG`/`NEGI` `NEGU`/`NEGUI` | Executed. Compare writes 0, 1, or the unsigned bit pattern of −1. For `NEG`/`NEGU`, `Y` is an unsigned byte in **both** the register form and the immediate form; `Z` is `$Z` or the unsigned byte. |
@@ -60,7 +63,7 @@ Status in the table means what `execute` does today.
 | `#x60`–`#x6F` | `CSN` `CSZ` `CSP` `CSOD` `CSNN` `CSNZ` `CSNP` `CSEV` and `I` forms | Executed. If the predicate on `$Y` holds, `$X ← Z`; otherwise `$X` is left alone. |
 | `#x70`–`#x7F` | `ZSN` `ZSZ` `ZSP` `ZSOD` `ZSNN` `ZSNZ` `ZSNP` `ZSEV` and `I` forms | Executed. `$X ← Z` when the predicate holds, else `$X ← 0`. |
 | `#x80`–`#x8F` | `LDB` `LDBU` `LDW` `LDWU` `LDT` `LDTU` `LDO` `LDOU` and `I` forms | Executed. Signed loads sign-extend. Widths are 1, 2, 4, and 8 bytes. |
-| `#x90`–`#x91` | `LDSF`/`LDSFI` | Not executed. Fault: "LDSF is not implemented". |
+| `#x90`–`#x91` | `LDSF`/`LDSFI` | Executed. Aligned tetra load, widened from binary32 to binary64. Increments `vm-mems`. |
 | `#x92`–`#x93` | `LDHT`/`LDHTI` | Executed. The aligned tetra is shifted left by 32. |
 | `#x94`–`#x95` | `CSWAP`/`CSWAPI` | Executed. Compare the octa at the aligned address with `rP`. On a match, store `$X` and set `$X ← 1`. Otherwise set `rP` from memory and `$X ← 0`. |
 | `#x96`–`#x97` | `LDUNC`/`LDUNCI` | Executed as `LDOU`. There is no cache. |
@@ -68,7 +71,7 @@ Status in the table means what `execute` does today.
 | `#x9A`–`#x9D` | `PRELD`/`PRELDI` `PREGO`/`PREGOI` | No-ops. |
 | `#x9E`–`#x9F` | `GO`/`GOI` | Executed. `$X ← PC+4`, then `PC ← ($Y + Z)` with the low two bits cleared. `rJ` is not written. |
 | `#xA0`–`#xAF` | `STB` `STBU` `STW` `STWU` `STT` `STTU` `STO` `STOU` and `I` forms | Executed. A signed store that does not fit the width sets `V` in `rA` and still writes the low bytes. |
-| `#xB0`–`#xB1` | `STSF`/`STSFI` | Not executed. Fault: "STSF is not implemented". |
+| `#xB0`–`#xB1` | `STSF`/`STSFI` | Executed. Narrows binary64 to binary32 with the current rounding mode, then writes the tetra. Overflow sets `O` and `X`, not `V`. |
 | `#xB2`–`#xB3` | `STHT`/`STHTI` | Executed. Stores bits 63–32 of `$X` as a tetra. |
 | `#xB4`–`#xB5` | `STCO`/`STCOI` | Executed. Stores the unsigned byte `X` (the instruction field, not `$X`) as an octa. |
 | `#xB6`–`#xB7` | `STUNC`/`STUNCI` | Executed as `STOU`. |
@@ -110,6 +113,18 @@ All general-register values are stored as unsigned 64-bit patterns. Signed opera
 | `NEGU` | Same subtraction modulo 2^64 | no event |
 
 An event bit is always recorded. A trip happens only when the matching enable bit is set. Enables are `rA` bits 15–8, the event bit shifted up by 8. They default to 0, so overflow does not leave the instruction stream unless the program turned the enable on.
+
+## Floating point
+
+`src/float/` executes the floating-point opcodes. A general register holds a binary64 bit pattern. The implementation does not call `float` or `coerce`.
+
+`rA` bits 17–16 select the rounding mode: 00 nearest, ties to even; 01 toward zero; 10 toward +∞; 11 toward −∞. `FIX`, `FIXU`, `FLOT`, `FLOTU`, `SFLOT`, `SFLOTU`, their immediate forms, `FSQRT`, and `FINT` read `Y` as an override: 0 uses `rA`, 1 is toward zero, 2 toward +∞, 3 toward −∞, 4 nearest/even. Any other `Y` faults with "illegal rounding mode" before the operation. `FADD`, `FSUB`, `FMUL`, `FDIV`, and `FSQRT` round the exact result. `FREM` is the IEEE remainder and ignores the mode.
+
+Comparisons write the integer −1, 0, or +1. `FCMP` of a NaN writes 0 and sets `I`. `FEQL` and `FUN` do not set `I`. `FCMPE`, `FUNE`, and `FEQLE` consult `rE`.
+
+`LDSF` loads an aligned tetra and widens it. `STSF` narrows with the current mode and stores that tetra. A binary64 value that does not fit binary32 sets `O` and `X` and still writes the short encoding. A signaling NaN is quieted and sets `I`. `STSF` does not set `V`.
+
+`W I O U Z X` are merged into `rA` after the result is written. Overflow always also sets `X`. Exact underflow sets `U` only when the `U` enable is on. When several enables are on, one trip is taken, at the highest enabled bit of `D V W I O U Z X`, and every event bit from that instruction stays set. Disabled exceptions deliver the IEEE default and do not leave the instruction stream.
 
 ## Register window
 
@@ -180,7 +195,7 @@ rS = rO + 8*rL
 |------|---------|
 | 7…0 | Events `D V W I O U Z X`, values `#x80` `#x40` `#x20` `#x10` `#x08` `#x04` `#x02` `#x01` |
 | 15…8 | Enables for those events |
-| 17…16 | Rounding mode. Stored by `PUT` and otherwise unused, because floating point is not executed |
+| 17…16 | Rounding mode for floating point: 00 nearest/even, 01 toward 0, 10 toward +∞, 11 toward −∞ |
 
 `GET` can read any special, including the ones `PUT` refuses.
 
@@ -222,7 +237,7 @@ Assembler specials accept `rJ`, `J`, or the number `4`. One leading `R` is strip
 | Z | `#x02` | 112 |
 | X | `#x01` | 128 |
 
-`TRIP X,Y,Z` always trips, to address 0, with `rY` and `rZ` taken from the instruction fields. The arithmetic result is written before the trip. `RESUME` with `XYZ = 0` continues at `rW`. There is no kernel, so `TRAP 0,0,1` (the hardware’s "resume into the kernel" encoding) records a fault and halts.
+`TRIP X,Y,Z` always trips, to address 0, with `rY` and `rZ` taken from the instruction fields. The arithmetic result is written before the trip. A floating-point instruction that raises several enabled exceptions records every event bit, then trips once, to the vector of the highest enabled bit. `RESUME` with `XYZ = 0` continues at `rW`. There is no kernel, so `TRAP 0,0,1` (the hardware’s "resume into the kernel" encoding) records a fault and halts. The trip image itself is still the simplified one: `rX` is the raw instruction, and `$255` is not loaded from `rJ`.
 
 ## Traps
 
@@ -330,13 +345,12 @@ Exported from `cl-mmix` (see `src/package.lisp`):
 
 ## What the tests lock down
 
-`sbcl --script tests/run-tests.lisp` runs 50 checks. They cover decode, big-endian memory, the original sum/factorial/hello demos, the cycle limit, branch opcode bytes (`JMPB` is `#xF1FFFFFF` for a one-instruction backward jump; a forward `BZ` with displacement 2 is `#x42010002`), shift and divide edge cases, `MULU`’s high half, `LDA`/`2ADDU`/`16ADDU`, the register window and `PUT`, conditional sets, alignment and the `V` bit on `STB`, `MOR` byte reversal, `GO` leaving `rJ` alone, `PUSHJ`/`GETA`, recursive factorial, the page budget, kernel-address faults, the floating-point and `SAVE` faults, `TRIP`/`RESUME`, an enabled `V` trip, `Fopen` refusing handles 0–2, legacy putchar, `Fgets`/`Fwrite`, breakpoints, and a hand-built `.mmo` image (including XOR, `lop_fixo`, a `Main` symbol, and a data-segment location).
+`sbcl --script tests/run-tests.lisp` runs 73 checks. `tests/tests.lisp` covers decode, big-endian memory, the original sum/factorial/hello demos, the cycle limit, branch opcode bytes (`JMPB` is `#xF1FFFFFF` for a one-instruction backward jump; a forward `BZ` with displacement 2 is `#x42010002`), shift and divide edge cases, `MULU`’s high half, `LDA`/`2ADDU`/`16ADDU`, the register window and `PUT`, conditional sets, alignment and the `V` bit on `STB`, `MOR` byte reversal, `GO` leaving `rJ` alone, `PUSHJ`/`GETA`, recursive factorial, the page budget, kernel-address faults, `FADD` of zeros followed by the `SAVE` fault, `TRIP`/`RESUME`, an enabled `V` trip, `Fopen` refusing handles 0–2, legacy putchar, `Fgets`/`Fwrite`, breakpoints, and a hand-built `.mmo` image (including XOR, `lop_fixo`, a `Main` symbol, and a data-segment location). `tests/float.lisp` covers binary64 arithmetic, signed zero, ties to even, overflow with and without the `O` enable, `FDIV` by zero, `FSQRT` of −1, `FREM`, `FCMPE`/`FEQLE`, `LDSF`/`STSF`, and `FIX` of 2^63.
 
 ## What is still not MMIX
 
 The full catalog, including kernel mode and multi-core, is [TAOCP-GAP-ANALYSIS.md](TAOCP-GAP-ANALYSIS.md). The short list:
 
-- IEEE floating point (`#x01`–`#x17`, `LDSF`, `STSF`), including rounding. `rA` bits 17–16 are stored and ignored.
 - `SAVE` and `UNSAVE`.
 - `RESUME` other than `XYZ = 0`.
 - Virtual memory: no `rV`, no page tables, `LDVTS` returns 0, bit 63 is a hard fault rather than a kernel mapping.

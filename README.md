@@ -2,7 +2,7 @@
 
 A user-mode **MMIX** virtual machine in portable Common Lisp (tested on SBCL).
 
-It runs educational MMIXAL: the integer instruction set, the register stack, the four address segments, MMIX-SIM traps, and `.mmo` object files. It is not an MMIXware replacement: there is no pipeline, no virtual memory, and no IEEE floating point.
+It runs educational MMIXAL: the integer and floating-point instruction sets, the register stack, the four address segments, MMIX-SIM traps, and `.mmo` object files. It is not an MMIXware replacement: there is no pipeline and no virtual memory.
 
 What the code actually does, opcode by opcode, is written in [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md). The distance from that code to a full MMIX machine is [docs/TAOCP-GAP-ANALYSIS.md](docs/TAOCP-GAP-ANALYSIS.md), and the sequence of plans is [docs/plans/00-roadmap.md](docs/plans/00-roadmap.md).
 
@@ -12,6 +12,7 @@ What the code actually does, opcode by opcode, is written in [docs/IMPLEMENTATIO
 - `PUSHJ`/`PUSHJB`/`PUSHGO`/`PUSHGOI` and `POP`. `rJ` is written only by the push instructions. `GO`/`GOI` set `$X` to the next address and jump, with the low two bits cleared.
 - Special registers. `GET`, `PUT`, and `PUTI` follow the user-mode rules (`rL` only decreases, `rG` stays at least 32, `rA` keeps bits 0–17, privileged registers are unchanged).
 - Integer arithmetic, including floor `DIV`, `DIVU` with `rD`, `MULU`/`rH`, scaled `ADDU`, and the `V`/`D` bits in `rA`. A shift count of 64 or more yields 0 (`SR` yields 0 or −1 from the sign).
+- IEEE floating point in `src/float/`: `#x01`–`#x17` plus `LDSF`/`STSF`. Registers hold binary64 bit patterns. Rounding comes from `rA` bits 17–16, with a `Y` override on the conversion opcodes.
 - Loads and stores of byte, wyde, tetra, and octa, plus the immediate forms. Addresses are aligned by masking low bits. Signed stores that do not fit set `V` and still write the low bytes.
 - Bitwise operations: `AND`/`OR`/`XOR` and their complements, `BDIF`/`WDIF`/`TDIF`/`ODIF`, `MUX`, `SADD`, `MOR`/`MXOR`, wyde immediates, `LDHT`/`STHT`/`STCO`, and `CSWAP`.
 - `CS*`/`ZS*`, branches (`BN`…`PBV` and the backward opcodes), `JMP`/`JMPB`, `GETA`/`GETAB`.
@@ -26,8 +27,8 @@ What the code actually does, opcode by opcode, is written in [docs/IMPLEMENTATIO
 ```
 cl-mmix/
   cl-mmix.asd
-  src/          package, util, machine, decode, trap, ops, asm, mmo, api
-  tests/        assert-style tests (no FiveAM)
+  src/          package, util, machine, decode, float/, trap, ops, asm, mmo, api
+  tests/        assert-style tests (no FiveAM), including tests/float.lisp
   scripts/run-demo.lisp
   docs/         implementation guide, full-machine gap analysis, and plans/
   README.md
@@ -181,8 +182,8 @@ sbcl --script tests/run-tests.lisp
 
 [docs/TAOCP-GAP-ANALYSIS.md](docs/TAOCP-GAP-ANALYSIS.md) is the gap between this tree and a full machine (kernel, remaining opcodes, virtual memory, pipeline, and multi-core). [docs/plans/00-roadmap.md](docs/plans/00-roadmap.md) is the order of work. The largest holes:
 
-- Floating-point opcodes `#x01`–`#x17` and `LDSF`/`STSF` halt with `vm-fault` "floating point is not implemented".
 - `SAVE`/`UNSAVE` halt with "SAVE/UNSAVE is not implemented".
+- An enabled floating-point exception trips with today's entry: the event bit stays set, and `rX` is the raw instruction.
 - No `rV` page tables, no dynamic traps, no pipeline, no `υ`/`μ` counts beyond a simple `mems` counter.
 - `RESUME` accepts only `XYZ` = 0 (`PC ← rW`).
 - `SWYM` does not halt. `PRE*`/`SYNC*`/`SYNCD`/`SYNCID` are no-ops. `LDUNC`/`STUNC` are ordinary octa accesses. `LDVTS` returns 0.

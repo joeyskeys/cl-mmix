@@ -47,7 +47,7 @@ These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (
 
 | Plan | Gap | Current | Full target |
 |------|-----|---------|-------------|
-| [01](plans/01-floating-point.md) | Floating point | `#x01`–`#x17`, `LDSF`, `STSF` halt with `vm-fault` | IEEE binary64 and binary32 load/store, four rounding modes, events `WIOUZX` |
+| [01](plans/01-floating-point.md) | Floating point | Opcodes execute in `src/float/`. Enabled exceptions still use today's trip image | Same arithmetic; plan 02 supplies the spec trip entry |
 | [02](plans/02-trips-and-resume.md) | Trips and `RESUME 0` | Trip enters a vector; `rX` is the raw tetra; `RESUME` always jumps to `rW` | §35 and §38: negative `rX`, `$255 ← rJ`, ropcodes 0–2 |
 | [03](plans/03-save-unsave.md) | `SAVE` / `UNSAVE` | Fault "SAVE/UNSAVE is not implemented" | §43 context image; interruptible spill once traps exist |
 | [04](plans/04-machine-specials.md) | `rC` `rF` `rI` `rN` `rU` | Slots exist and stay 0; `PUT` ignores them | Interval timer, usage counter, frozen serial, failure address, continuation page |
@@ -68,9 +68,6 @@ Dependency order is in the [roadmap](plans/00-roadmap.md). Plans 01, 02, 03, 08,
 
 | Bytes | Names | Fault string |
 |-------|--------|----------------|
-| `#x01`–`#x17` | `FCMP` `FUN` `FEQL` `FADD` `FIX` `FSUB` `FIXU` `FLOT`/`FLOTI` `FLOTU`/`FLOTUI` `SFLOT`/`SFLOTI` `SFLOTU`/`SFLOTUI` `FMUL` `FCMPE` `FUNE` `FEQLE` `FDIV` `FSQRT` `FREM` `FINT` | "floating point is not implemented" |
-| `#x90`–`#x91` | `LDSF`/`LDSFI` | "LDSF is not implemented" |
-| `#xB0`–`#xB1` | `STSF`/`STSFI` | "STSF is not implemented" |
 | `#xFA`–`#xFB` | `SAVE`/`UNSAVE` | "SAVE/UNSAVE is not implemented" |
 | `#xF9` with `XYZ ≠ 0` | `RESUME 1` and any other Z | "RESUME with a nonzero XYZ is not implemented" |
 
@@ -78,9 +75,7 @@ Everything else has a handler. Several handlers are the functional single-proces
 
 ### Floating point (§21–28, plan 01)
 
-Binary64: sign, 11-bit exponent, 52-bit fraction. Short float is binary32, loaded and stored by `LDSF`/`STSF` and widened to binary64 in registers. Rounding is `rA` bits 17–16: 00 nearest/even, 01 toward 0, 10 toward +∞, 11 toward −∞. Conversions take a per-instruction override in `Y` (`ROUND_OFF`, `ROUND_UP`, `ROUND_DOWN`, `ROUND_NEAR`). `FCMPE`, `FUNE`, and `FEQLE` consult `rE`.
-
-Exceptions set `W I O U Z X`. Overflow always also raises `X`. Underflow raises `U` and `X` when underflow is disabled, and may raise both when it is enabled. If both enables are set, the overflow or underflow handler runs and the inexact handler does not. Common Lisp floats are the wrong representation: NaN payloads, signed zero, and the rounding modes have to be bit operations on octas.
+The arithmetic is in `src/float/`. Registers hold binary64 patterns, `LDSF`/`STSF` widen and narrow binary32, and `rA` bits 17–16 select the rounding mode. What plan 02 still owes this path is the trip image: today every event bit stays set, `rX` is the raw instruction, and `$255` is not loaded from `rJ`. The handler that runs is already the highest enabled bit of `D V W I O U Z X`.
 
 ### `SAVE` / `UNSAVE` (§43, plan 03)
 

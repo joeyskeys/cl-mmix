@@ -1,7 +1,7 @@
 (in-package #:cl-mmix)
 
-;;; Full MMIX opcode map (Knuth, mmop.html). Execution of floating-point
-;;; and of SAVE/UNSAVE is deferred; the names are still known to the decoder.
+;;; Full MMIX opcode map (Knuth, mmop.html). SAVE/UNSAVE is named here and
+;;; still deferred; floating point is executed by src/float/.
 
 (defvar *op-byte* (make-hash-table :test 'eq))
 (defvar *op-name* (make-array 256 :initial-element :unknown))

@@ -7,7 +7,7 @@ The gap catalog is [../TAOCP-GAP-ANALYSIS.md](../TAOCP-GAP-ANALYSIS.md). The beh
 | Step | Plan | Starts from | Unlocks |
 |------|------|-------------|---------|
 | 1 | [02 Trips and RESUME 0](02-trips-and-resume.md) | Current tree | Spec-correct arithmetic trips, which floating point needs |
-| 2 | [01 Floating point](01-floating-point.md) | Plan 02 | The last data opcodes except `SAVE`/`UNSAVE` |
+| 2 | [01 Floating point](01-floating-point.md) | Landed ahead of plan 02, on today's trip entry | The last data opcodes except `SAVE`/`UNSAVE`. Plan 02 rechecks enabled floating-point exceptions |
 | 3 | [08 Timing costs](08-timing-costs.md) | Current tree; branch costs get sharper after plan 02 | The μ + υ line students check by hand |
 | 4 | [03 SAVE and UNSAVE](03-save-unsave.md) | Current register stack | Process images, and the MMIX-SIM startup prelude |
 | 5 | [04 Machine specials](04-machine-specials.md) | Current specials | `rI`, `rU`, `rN`, `rC`, `rF` as values, before they raise interrupts |
@@ -27,7 +27,7 @@ Plans 08 and 09 do not wait on plan 01. They sit where they do so the integer ma
 - New machinery is reached by an explicit keyword (`:kernel`, `:virtual-memory`, `:pipeline`, `:cores`) or by a new constructor. Turning the default over is a separate, last commit inside that plan, after the old tests pass both ways.
 - `PUT` restrictions, once plan 05 lands, signal an interrupt on the kernel path and remain silent no-ops on the user-mode path so existing tests stay valid.
 - Opcode names stay in `src/decode.lisp`. Plans add execution. They do not renumber bytes.
-- Each plan names the tests that lock its acceptance cases. Those tests live in `tests/tests.lisp` beside the current 50 checks.
+- Each plan names the tests that lock its acceptance cases. Those tests live under `tests/` beside the checks already there.
 
 ## Done when
 

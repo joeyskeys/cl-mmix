@@ -1,5 +1,7 @@
 # Plan 01 — Floating point
 
+Status: implemented in `src/float/`. Enabled exceptions trip through the entry that is in the tree today, so the event bit stays set and `rX` is the raw instruction. [Plan 02](02-trips-and-resume.md) rechecks that image.
+
 Depends on [02](02-trips-and-resume.md) for the trip entry that enabled exceptions use. The arithmetic itself can be written against today’s `signal-event`, then rechecked once plan 02 lands.
 
 Spec: `mmix-doc` §21–28 and the exception rules in §32. Opcodes `#x01`–`#x17`, `#x90`–`#x91`, `#xB0`–`#xB1`.
@@ -17,25 +19,24 @@ Spec: `mmix-doc` §21–28 and the exception rules in §32. Opcodes `#x01`–`#x
 General registers hold binary64 bit patterns, not Lisp floats.
 
 - Rounding modes in bits 17–16 of `rA`: 00 nearest, ties to even; 01 toward zero; 10 toward +∞; 11 toward −∞.
-- `FLOT`, `SFLOT`, `FLOTU`, `SFLOTU`, `FIX`, `FIXU`, `FINT` take the `Y` field as a rounding override: the MMIX names `ROUND_OFF`, `ROUND_UP`, `ROUND_DOWN`, `ROUND_NEAR`. Any other `Y` uses `rA`.
+- `FLOT`, `SFLOT`, `FLOTU`, `SFLOTU`, `FIX`, `FIXU`, `FINT`, and `FSQRT` take the `Y` field as a rounding override: 0 uses `rA`, 1 is `ROUND_OFF`, 2 is `ROUND_UP`, 3 is `ROUND_DOWN`, 4 is `ROUND_NEAR`. `Y > 4` is an illegal instruction.
 - `FADD`/`FSUB`/`FMUL`/`FDIV`/`FSQRT`/`FINT` round the exact result. `FREM` is the IEEE remainder and does not honor the rounding mode.
 - Comparisons write −1, 0, or +1 as an integer octa, or the unordered result specified for `FUN` / `FCMP`. `FCMPE`, `FUNE`, and `FEQLE` treat values within `rE` as equivalent, including the signed-zero and NaN cases in §22.
-- `LDSF` loads a binary32 tetra, aligns it, and widens it to binary64. `STSF` narrows with the current rounding mode, sets `V` when the store overflows the short format the way a signed integer store sets `V`, and still writes the low tetra of the short encoding. Quiet NaNs and the quieting of signaling NaNs follow §22.
+- `LDSF` loads a binary32 tetra, aligns it, and widens it to binary64. `STSF` narrows with the current rounding mode. A value that overflows binary32 sets `O` and `X` (not the integer `V` bit) and still writes the short encoding. Quiet NaNs and the quieting of signaling NaNs follow §22.
 - Overflow sets `O` and `X`. Underflow sets `U`, and sets `X` when the underflow is not enabled; when underflow is enabled it may set both. If both enables are on, the `O` or `U` handler runs and the `X` handler does not. Integer `FIX`/`FIXU` overflow sets `W`. Invalid operations set `I`. Divide by zero sets `Z`. Inexact sets `X`.
 - An enabled exception trips (plan 02). A disabled exception sets the event bit and delivers the default IEEE result (infinity, largest finite, NaN, or zero, as §21–28 specify for that opcode).
 
 ## Design
 
-New file `src/float.lisp`, loaded after `src/util.lisp` and before `src/ops.lisp`. All public helpers take and return `(unsigned-byte 64)`.
+Directory `src/float/`, loaded after `src/decode.lisp` and before `src/ops.lisp`. `octa.lisp`, `pack.lisp`, `arith.lisp`, and `exec.lisp` split the bit helpers, the packers, the operations, and the opcode glue. Later plans add a sibling directory rather than folding new subsystems into `ops.lisp`. All helpers take and return `(unsigned-byte 64)`.
 
-- Constructors and splitters for sign, exponent, and fraction of binary64 and binary32.
-- A rounding function of an exact rational plus a mode, used by every opcode that rounds. Subnormals and overflow to infinity live in that one function.
-- NaN payload helpers: propagation, signaling versus quiet, and the canonical quiet NaN this machine writes when an invalid operation has no input NaN.
-- `exec-float` in `src/ops.lisp` replaces the `#x01`–`#x17` clause. `exec-mem` replaces the `LDSF` and `STSF` faults.
+- `pack.lisp` packs and unpacks binary64 and binary32. Subnormals, overflow to infinity, and the round/sticky bits live in `fpack` and `sfpack`.
+- `arith.lisp` is the MMIXware operation set: add, multiply, divide, remainder, square root, compare, epsilon compare, and the integer conversions. NaN payloads stay in the octa.
+- `exec.lisp` provides `exec-float`, `exec-ldsf`, and `exec-stsf`. `src/ops.lisp` dispatches to them. The result is written before `rA` is updated.
 
 Do not call `float` or `coerce` to `double-float`. SBCL’s IEEE floats are close, and they are the wrong place to implement a chosen rounding mode and a stable NaN payload.
 
-`STSF` that cannot fit sets `+ev-v+` through `signal-event`, the same path signed `STB` uses.
+`STSF` that cannot fit sets `O` and `X` through the same commit used by the arithmetic opcodes. It does not set `V`.
 
 ## Tests
 
@@ -43,7 +44,7 @@ Add cases next to the existing arithmetic tests:
 
 - 1.0 + 2.0, and 1.0 + −1.0, including signed zero under each rounding mode.
 - A tie that rounds to even.
-- Overflow to infinity with `O` and `X` set and the enable clear; the same add with the `O` enable set, leaving the `O` event bit clear and `PC` at 80 (once plan 02 is in).
+- Overflow to infinity with `O` and `X` set and the enable clear; the same add with the `O` enable set, `PC` at 80, and the `O` event bit still set until plan 02 clears it.
 - `FDIV` by zero sets `Z` and yields an infinity with the right sign.
 - `FSQRT` of −1 sets `I`.
 - `FREM` of a large exponent against a small one matches a hand-computed remainder.

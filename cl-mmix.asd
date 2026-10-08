@@ -3,7 +3,7 @@
   :description "User-mode MMIX virtual machine for educational MMIXAL programs"
   :author "cl-mmix"
   :license "GPL-3.0"
-  :version "0.9.0"
+  :version "0.10.0"
   :depends-on ()
   :serial t
   :components ((:module "src"
@@ -12,6 +12,13 @@
                  (:file "util")
                  (:file "machine")
                  (:file "decode")
+                 ;; Later plans add a sibling directory here instead of growing ops.lisp.
+                 (:module "float"
+                  :serial t
+                  :components ((:file "octa")
+                               (:file "pack")
+                               (:file "arith")
+                               (:file "exec")))
                  (:file "trap")
                  (:file "ops")
                  (:file "asm")
@@ -25,6 +32,7 @@
   :serial t
   :components ((:module "tests"
                 :components
-                ((:file "tests"))))
+                ((:file "tests")
+                 (:file "float"))))
   :perform (test-op (o c) (symbol-call :cl-mmix/tests :run-tests)))
 

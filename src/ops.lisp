@@ -39,10 +39,6 @@
 (defun unimplemented (what)
   (error 'mmix-fault :reason (format nil "~A is not implemented" what)))
 
-(defun illegal-instruction ()
-  "The b condition. Until plan 05 this halts with vm-fault."
-  (error 'mmix-fault :reason "illegal instruction"))
-
 (defun marginal-reg-p (vm n)
   "True when $N is neither local nor global."
   (let ((n (u8 n)))
@@ -458,8 +454,16 @@ ropcode above 2, and ropcode 3 are illegal."
              (u64 (+ (special-reg vm +r-j+) (* 4 (inst-yz inst)))))
        :jump)
       ((= op #xF9) (exec-resume vm inst))
-      ((or (= op #xFA) (= op #xFB))
-       (unimplemented "SAVE/UNSAVE"))
+      ((= op #xFA)
+       (unless (and (zerop (inst-y inst)) (zerop (inst-z inst)))
+         (illegal-instruction))
+       (save-context vm (inst-x inst))
+       nil)
+      ((= op #xFB)
+       (unless (and (zerop (inst-x inst)) (zerop (inst-y inst)))
+         (illegal-instruction))
+       (unsave-context vm (reg vm (inst-z inst)))
+       nil)
       ((or (= op #xFC) (= op #xFD)) nil)
       ((= op #xFE)
        (unless (zerop (inst-y inst)) (illegal-instruction))

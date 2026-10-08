@@ -2,7 +2,7 @@
 
 This document describes this tree (ASDF system `cl-mmix`, version 0.10.0). It is what the sources do today. The distance from this tree to a full machine — kernel mode, the remaining opcodes, virtual memory, a pipeline, and shared-memory multi-core — is [TAOCP-GAP-ANALYSIS.md](TAOCP-GAP-ANALYSIS.md). The order of work is [plans/00-roadmap.md](plans/00-roadmap.md).
 
-The VM is a **user-mode functional interpreter** for educational MMIXAL. Every one of the 256 opcode bytes has a name in the decoder. The integer, bitwise, floating-point, load/store, branch, wyde, register-stack, and MMIX-SIM `TRAP` instructions are executed. `SAVE`/`UNSAVE` are recognized and stop the machine with `vm-fault`. There is no pipeline, no page-table `rV`, and no dynamic trap entry into a kernel.
+The VM is a **user-mode functional interpreter** for educational MMIXAL. Every one of the 256 opcode bytes has a name in the decoder. The integer, bitwise, floating-point, load/store, branch, wyde, register-stack, `SAVE`/`UNSAVE`, and MMIX-SIM `TRAP` instructions are executed. There is no pipeline, no page-table `rV`, and no dynamic trap entry into a kernel.
 
 ## Source map
 
@@ -12,7 +12,7 @@ ASDF loads `src/` serially, in this order:
 |------|----------------|
 | `package.lisp` | Packages `cl-mmix` and `cl-mmix/tests`, and the public exports |
 | `util.lisp` | 64-bit wrap, signed views, overflow, floor division, shifts, `BDIF` slices, `MOR`/`MXOR` |
-| `machine.lisp` | VM struct, special registers, the `rL`/`rG` window, sparse memory, the register stack, `PUT` rules, breakpoints, trips |
+| `machine.lisp` | VM struct, special registers, the `rL`/`rG` window, sparse memory, the register stack, `SAVE`/`UNSAVE`, `PUT` rules, breakpoints, trips |
 | `decode.lisp` | The 256-opcode name table, encode/decode, fetch, disassembly |
 | `float/` | IEEE binary64 and binary32. `octa.lisp` holds the bit helpers, `pack.lisp` packs and unpacks, `arith.lisp` is the operations, `exec.lisp` dispatches opcodes and commits `rA` |
 | `trap.lisp` | MMIX-SIM `TRAP` services and the legacy putchar switch |
@@ -87,9 +87,9 @@ Status in the table means what `execute` does today.
 | `#xF2`–`#xF3` | `PUSHJ`/`PUSHJB` | Executed. Register-stack push, `rJ ← PC+4`, then a 16-bit relative branch. |
 | `#xF4`–`#xF5` | `GETA`/`GETAB` | Executed. `$X ←` the target address. Control does not branch. |
 | `#xF6`–`#xF7` | `PUT`/`PUTI` | Executed. `PUT` writes `$Z` into special register `X`. `PUTI` writes the unsigned byte `Z`. A nonzero `Y` field is an illegal instruction. See [PUT](#put). |
-| `#xF8` | `POP` | Executed. `X` is the number of return values. `PC ← rJ + 4*YZ`. |
+| `#xF8` | `POP` | Executed. `X` is the number of return values. `PC ← rJ + 4*YZ`. A `SAVE` header on top of the stack faults as an empty register stack. |
 | `#xF9` | `RESUME` | `Z ≠ 0` faults with "RESUME with a nonzero XYZ is not implemented". A nonzero `X` or `Y` field is an illegal instruction. `RESUME 0` returns to `rW` when `rX` is negative, and otherwise inserts the low tetra of `rX`. See [Trips](#trips). |
-| `#xFA`–`#xFB` | `SAVE`/`UNSAVE` | Not executed. Fault: "SAVE/UNSAVE is not implemented". |
+| `#xFA`–`#xFB` | `SAVE`/`UNSAVE` | Executed. See [SAVE and UNSAVE](#save-and-unsave). A nonzero unused field, or a `SAVE` whose `$X` is not global, is an illegal instruction. |
 | `#xFC`–`#xFD` | `SYNC`/`SWYM` | No-ops. `SWYM` does not halt. |
 | `#xFE` | `GET` | Executed. `$X ←` special register `Z`, with no permission check. A nonzero `Y` field is an illegal instruction. |
 | `#xFF` | `TRIP` | Executed. Enters the trip handler at address 0 with the §35 register image. See [Trips](#trips). |
@@ -152,9 +152,9 @@ Comparisons write the integer −1, 0, or +1. `FCMP` of a NaN writes 0 and sets 
 
 `POP X,YZ` calls `pop-frame` with `N = X`.
 
-- An empty hidden stack is a fault.
+- An empty hidden stack is a fault. A top octa greater than 255 is not a return hole (it is a `SAVE` header) and faults the same way.
 - If `N > rL`, `N` becomes `rL+1`, which pulls one marginal zero into the returned values.
-- The hole index `x` is the last stacked octa modulo 256.
+- The hole index `x` is that top octa. A real hole is at most 255.
 - Callee `$(N−1)` is written into that hole. Callee `$0`…`$(N−2)` land at caller `$(x+1)` onward. The caller’s saved `$0`…`$(x−1)` are restored.
 - New `rL = min(x+N, rG)`. `POP 0` leaves the hole marginal (`rL = x`). `POP 1` puts the callee’s `$0` in the hole, which is the usual single return value.
 - `PC ← rJ + 4*YZ`.
@@ -166,7 +166,22 @@ rO = Stack_Segment + 8*tau
 rS = rO + 8*rL
 ```
 
-`PUSH`/`POP` with `X < rG` leave `rS` unchanged, which is the usual MMIX invariant. `demo-recursive-factorial` is a complete `PUSHJ`/`POP` factorial and is checked for `0!`, `1!`, `5!`, and `10!`.
+`PUSH`/`POP` with `X < rG` leave `rS` unchanged, which is the usual MMIX invariant. `demo-recursive-factorial` is a complete `PUSHJ`/`POP` factorial and is checked for `0!`, `1!`, `5!`, and `10!`. It does not execute `SAVE`.
+
+### SAVE and UNSAVE
+
+`SAVE $X,0` (`#xFA`) calls `save-context`. `Y` and `Z` must be 0, and `$X` must be global (`X ≥ rG`). Otherwise the instruction is illegal and the stack is unchanged.
+
+1. Push `$0`…`$(rL−1)` and the old `rL` as the hole, the same slide as `push-frame` with `X ≥ rG`. `rL ← 0`.
+2. Push `$rG`…`$255`.
+3. Push `rB`, `rD`, `rE`, `rH`, `rJ`, `rM`, `rR`, `rP`, `rW`, `rX`, `rY`, `rZ`.
+4. Push one octa: top byte `rG`, next three bytes 0, low tetra `rA`.
+5. `$X ←` the address of that octa.
+6. `rO = rS` = the first byte after the image. `POP` faults until `UNSAVE`, because the top octa is the header.
+
+`UNSAVE 0,$Z` (`#xFB`) calls `unsave-context`. `X` and `Y` must be 0. `$Z` is the address of the header octa. The image is read from the top down. When that address is the current top of `vm-stack` (`rO − 8`), the octas come from the vector. When a program has copied the image elsewhere, they come from memory. Restored `rL` is the hole. `rO` returns to the address of the first saved local, and `rS = rO + 8*rL`. A header whose top byte is below 32, whose middle three bytes are nonzero, or whose low tetra has bits above 17 is an illegal instruction.
+
+Both instructions finish inside one `step-vm`. An interruptible `SAVE` would record a phase and a count in `rX` (`α = β = γ`, `rO = rS`, `rL = 0`). That hook belongs to plan 05. `lop_post` still writes globals directly. The MMIX-SIM startup `UNSAVE` is plan 10.
 
 ## Special registers
 
@@ -293,7 +308,7 @@ Any other `Y = 0` halt still stores `$255` as the exit code. `Fputs` of five cha
 - Wyde immediates (`SETL`, `ORL`, …) must fit in 16 bits. Byte immediates, recognized by a mnemonic that ends in `I` (except `PUTI`, `NEGI`, `NEGUI`), must fit in 8 bits and are unsigned.
 - `(neg $X Y $Z)` and `(negu $X Y $Z)` take `Y` as an unsigned byte. The `I` forms take `Z` as an unsigned byte too.
 - Data: `:byte`, `:wyde`, `:tetra`, `:octa` (and `:word` as an octa alias), `:string`, `:zstring`.
-- `(trap X Y Z)`, `(trip X Y Z)`, `(pop X YZ)`, `(get $X special)`, `(put special $Z)`, `(puti special byte)`, `(swym)`, `(sync xyz)`, `(resume xyz)`, `(save)`, `(unsave)`.
+- `(trap X Y Z)`, `(trip X Y Z)`, `(pop X YZ)`, `(get $X special)`, `(put special $Z)`, `(puti special byte)`, `(swym)`, `(sync xyz)`, `(resume xyz)`, `(save xyz)`, `(unsave xyz)`. The `xyz` integer of `SAVE` and `UNSAVE` is the raw 24-bit field (`SAVE $255` is `#xFF0000`).
 
 `assemble-into` writes each segment with `mem-set-u8`, clears halt/cycle/fault state, stores the label table on the VM, and does not clear registers. `load-program` writes one byte vector at one origin.
 
@@ -359,14 +374,13 @@ Exported from `cl-mmix` (see `src/package.lisp`):
 
 ## What the tests lock down
 
-`sbcl --script tests/run-tests.lisp` runs 81 checks. `tests/tests.lisp` covers decode, big-endian memory, the original sum/factorial/hello demos, the cycle limit, branch opcode bytes (`JMPB` is `#xF1FFFFFF` for a one-instruction backward jump; a forward `BZ` with displacement 2 is `#x42010002`), shift and divide edge cases, `MULU`’s high half, `LDA`/`2ADDU`/`16ADDU`, the register window and `PUT`, conditional sets, alignment and the `V` bit on `STB`, `MOR` byte reversal, `GO` leaving `rJ` alone, `PUSHJ`/`GETA`, recursive factorial, the page budget, kernel-address faults, `FADD` of zeros followed by the `SAVE` fault, `TRIP`/`RESUME 0` (including ropcodes 0–2 and a nonzero `Y` on `PUT`), an enabled `V` trip, `Fopen` refusing handles 0–2, legacy putchar, `Fgets`/`Fwrite`, breakpoints, and a hand-built `.mmo` image (including XOR, `lop_fixo`, a `Main` symbol, and a data-segment location). `tests/float.lisp` covers binary64 arithmetic, signed zero, ties to even, overflow with and without the `O` enable, `FDIV` by zero, `FSQRT` of −1, `FREM`, `FCMPE`/`FEQLE`, `LDSF`/`STSF`, and `FIX` of 2^63.
+`sbcl --script tests/run-tests.lisp` runs 85 checks. `tests/tests.lisp` covers decode, big-endian memory, the original sum/factorial/hello demos, the cycle limit, branch opcode bytes (`JMPB` is `#xF1FFFFFF` for a one-instruction backward jump; a forward `BZ` with displacement 2 is `#x42010002`), shift and divide edge cases, `MULU`’s high half, `LDA`/`2ADDU`/`16ADDU`, the register window and `PUT`, conditional sets, alignment and the `V` bit on `STB`, `MOR` byte reversal, `GO` leaving `rJ` alone, `PUSHJ`/`GETA`, recursive factorial, the page budget, kernel-address faults, `FADD` of zeros followed by an illegal `SAVE` whose `$X` is not global, `SAVE`/`UNSAVE` (round trip, header, `POP` after `SAVE`, a nonzero `Y`, and a moved image), `TRIP`/`RESUME 0` (including ropcodes 0–2 and a nonzero `Y` on `PUT`), an enabled `V` trip, `Fopen` refusing handles 0–2, legacy putchar, `Fgets`/`Fwrite`, breakpoints, and a hand-built `.mmo` image (including XOR, `lop_fixo`, a `Main` symbol, and a data-segment location). `tests/float.lisp` covers binary64 arithmetic, signed zero, ties to even, overflow with and without the `O` enable, `FDIV` by zero, `FSQRT` of −1, `FREM`, `FCMPE`/`FEQLE`, `LDSF`/`STSF`, and `FIX` of 2^63.
 
 ## What is still not MMIX
 
 The full catalog, including kernel mode and multi-core, is [TAOCP-GAP-ANALYSIS.md](TAOCP-GAP-ANALYSIS.md). The short list:
 
-- `SAVE` and `UNSAVE`.
-- `RESUME 1` (`Z ≠ 0`). `RESUME 0` inserts ropcodes 0–2.
+- `RESUME 1` (`Z ≠ 0`). `RESUME 0` inserts ropcodes 0–2. `SAVE`/`UNSAVE` run to completion in one instruction; the interruptible spill is plan 05.
 - Virtual memory: no `rV`, no page tables, `LDVTS` returns 0, bit 63 is a hard fault rather than a kernel mapping.
 - Dynamic traps and the privileged specials that a kernel would update (`rT`, `rTT`, `rK`, `rQ`, `rC`, and the bootstrap copies).
 - A pipeline, prediction for `PB*`, and separate υ/μ counts. `vm-cycles` counts instructions. `vm-mems` counts loads and stores.

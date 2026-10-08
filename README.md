@@ -182,7 +182,6 @@ sbcl --script tests/run-tests.lisp
 
 [docs/TAOCP-GAP-ANALYSIS.md](docs/TAOCP-GAP-ANALYSIS.md) is the gap between this tree and a full machine (kernel, remaining opcodes, virtual memory, pipeline, and multi-core). [docs/plans/00-roadmap.md](docs/plans/00-roadmap.md) is the order of work. The largest holes:
 
-- `SAVE`/`UNSAVE` halt with "SAVE/UNSAVE is not implemented".
 - No `rV` page tables, no dynamic traps, no pipeline, no `υ`/`μ` counts beyond a simple `mems` counter.
 - `RESUME 1` (`Z ≠ 0`) is not implemented. `RESUME 0` inserts ropcodes 0–2.
 - `SWYM` does not halt. `PRE*`/`SYNC*`/`SYNCD`/`SYNCID` are no-ops. `LDUNC`/`STUNC` are ordinary octa accesses. `LDVTS` returns 0.

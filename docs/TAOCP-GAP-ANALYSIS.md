@@ -31,12 +31,13 @@ Where this file and the code disagree, the code wins for “implemented” and `
 
 ## Baseline already in the tree
 
-These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (81 checks) and must keep `make-vm` usable as a user-mode interpreter.
+These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (85 checks) and must keep `make-vm` usable as a user-mode interpreter.
 
 - All 256 opcode bytes are named in `src/decode.lisp`.
 - Integer arithmetic, shifts, compares, bitwise ops, wyde immediates, conditional sets, branches (including backward and probable forms), `JMP`/`GETA`/`GO`/`PUSHJ`/`PUSHGO`/`POP`, tetra and immediate loads and stores, `LDHT`/`STHT`/`STCO`/`CSWAP`/`MOR`/`MXOR`.
 - The `rL`/`rG` window, a Lisp register stack, and `rO`/`rS` kept consistent with `Stack_Segment + 8*tau`.
 - `GET`/`PUT`/`PUTI` with the user-mode restrictions, including a nonzero `Y` field as an illegal instruction. `rA` event and enable bits. `TRIP` and `RESUME 0` with the §35 image and ropcodes 0–2 (plan 02).
+- `SAVE` and `UNSAVE` of the §43 register image (plan 03). The instruction runs to completion inside one `step-vm`.
 - Four segments, sparse 4096-byte grow-on-touch chunks, a page budget (`:memory-size`, default `#x2000000`). Those chunks are an allocator granule. They are not architectural pages (`2^s` with `s ≥ 13`).
 - MMIX-SIM `TRAP` services Y = 0…10, intercepted in Lisp. Handles 0–2 are StdIn, StdOut, StdErr. Legacy putchar is opt-in.
 - S-expression assembler, `.mmo` loader, breakpoints, `step-vm` / `run-vm` / `continue-vm`, dumps.
@@ -49,7 +50,7 @@ These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (
 |------|-----|---------|-------------|
 | [01](plans/01-floating-point.md) | Floating point | Opcodes execute in `src/float/`. Enabled exceptions use the plan 02 trip image | Same arithmetic |
 | [02](plans/02-trips-and-resume.md) | Trips and `RESUME 0` | Implemented. §35 image, event bit clear on the trip that is taken, ropcodes 0–2 | §35 and §38: negative `rX`, `$255 ← rJ`, ropcodes 0–2 |
-| [03](plans/03-save-unsave.md) | `SAVE` / `UNSAVE` | Fault "SAVE/UNSAVE is not implemented" | §43 context image; interruptible spill once traps exist |
+| [03](plans/03-save-unsave.md) | `SAVE` / `UNSAVE` | Implemented. §43 image in one step; `POP` after `SAVE` faults | Interruptible spill once traps exist |
 | [04](plans/04-machine-specials.md) | `rC` `rF` `rI` `rN` `rU` | Slots exist and stay 0; `PUT` ignores them | Interval timer, usage counter, frozen serial, failure address, continuation page |
 | [05](plans/05-kernel-traps.md) | Forced and dynamic traps | `TRAP` is a Lisp syscall; bit 63 halts; privileged `PUT` is a silent no-op | `rT` / `rTT`, `rK`/`rQ`, `rwxnkbsp`, `RESUME 1`, kernel ROM for MMIX-SIM |
 | [06](plans/06-virtual-memory.md) | `rV` translation | Flat segments; `LDVTS` returns 0 | PTEs, PTPs, protection, translation caches, MMIO at physical `≥ 2^48` |
@@ -68,7 +69,6 @@ Dependency order is in the [roadmap](plans/00-roadmap.md). Plans 01, 02, 03, 08,
 
 | Bytes | Names | Fault string |
 |-------|--------|----------------|
-| `#xFA`–`#xFB` | `SAVE`/`UNSAVE` | "SAVE/UNSAVE is not implemented" |
 | `#xF9` with `Z ≠ 0` | `RESUME 1` | "RESUME with a nonzero XYZ is not implemented" |
 
 Everything else has a handler. Several handlers are the functional single-processor approximation of an instruction whose real effect is a cache, a pipe drain, a translation cache, or a kernel entry. Those are gaps of meaning, listed below, and they are not missing names in `*op-name*`.
@@ -79,9 +79,9 @@ The arithmetic is in `src/float/`. Registers hold binary64 patterns, `LDSF`/`STS
 
 ### `SAVE` / `UNSAVE` (§43, plan 03)
 
-`SAVE $X,0` pushes locals as `PUSHGO` with `X = 255` would, sets `rL ← 0`, pushes `$G`…`$255`, then `rB rD rE rH rJ rM rR rP rW rX rY rZ`, then one octa packing `rG` in the top byte and `rA` in the low tetra. `$X` (a global) receives the address of that top octa. Afterwards `rO = rS` and the register stack is empty.
+Landed as a complete image inside one `step-vm`. `SAVE $X,0` pushes locals as `push-frame` with `X ≥ rG` would, sets `rL ← 0`, pushes `$G`…`$255`, then `rB rD rE rH rJ rM rR rP rW rX rY rZ`, then one octa packing `rG` in the top byte and `rA` in the low tetra. `$X` (a global) receives the address of that top octa. Afterwards `rO = rS`. `POP` faults because the top octa is the header, not a return hole.
 
-`UNSAVE 0,$Z` restores that image. It is destructive: a second `UNSAVE` of the same image is not reliable. Both instructions are interruptible in the architecture. The official loader starts a process by `UNSAVE` of a fabricated image (MMIX-SIM §37). Today `load-mmo` applies `lop_post` directly and sets `PC` from `Main`.
+`UNSAVE 0,$Z` restores that image from `vm-stack` when `$Z` is the current top, and from memory when the image was moved. A second `UNSAVE` of the same image is not reliable. Both instructions are interruptible in the architecture; the phase counter in `rX` is the plan 05 hook and is not written yet. The official loader starts a process by `UNSAVE` of a fabricated image (MMIX-SIM §37). `load-mmo` still applies `lop_post` directly and sets `PC` from `Main` (plan 10).
 
 ### Trips (§35, plan 02)
 

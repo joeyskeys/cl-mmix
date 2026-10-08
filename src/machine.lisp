@@ -63,6 +63,10 @@
   ((reason :initarg :reason :reader mmix-fault-reason))
   (:report (lambda (c s) (format s "MMIX fault: ~A" (mmix-fault-reason c)))))
 
+(defun illegal-instruction ()
+  "The b condition. Until plan 05 this halts with vm-fault."
+  (error 'mmix-fault :reason "illegal instruction"))
+
 (defstruct fio
   kind
   mode
@@ -410,29 +414,131 @@ ones land just after the hole, in order."
          (tau (length stack)))
     (when (zerop tau)
       (error 'mmix-fault :reason "POP with an empty register stack"))
-    (let ((l (reg-l vm)))
-      (when (> n l)
-        (setf n (1+ l)))
-      (let* ((x (mod (aref stack (1- tau)) 256))
-             (rvs (make-array (max n 1) :element-type '(unsigned-byte 64) :initial-element 0)))
-        (dotimes (i n)
-          (setf (aref rvs i) (reg vm i)))
-        (when (plusp n)
-          (setf (aref stack (1- tau)) (aref rvs (1- n))))
-        (let* ((new-l (min (+ x n) (reg-g vm)))
-               (base (- tau x 1)))
-          (when (minusp base)
-            (error 'mmix-fault :reason "POP frame is larger than the register stack"))
-          (let ((regs (vm-registers vm)))
-            (dotimes (k (min new-l (+ x (if (plusp n) 1 0))))
-              (setf (aref regs k) (aref stack (+ base k))))
-            (loop for i from 0 below (max 0 (1- n))
-                  for dest = (+ x 1 i)
-                  while (< dest new-l)
-                  do (setf (aref regs dest) (aref rvs i)))
-            (setf (fill-pointer stack) base)
-            (set-special vm +r-l+ new-l)
-            (sync-stack vm)))))))
+    (let ((top (aref stack (1- tau))))
+      ;; A return hole is at most 255. The SAVE header has rG in its top
+      ;; byte, so POP immediately after SAVE sees an empty register stack.
+      (unless (<= top 255)
+        (error 'mmix-fault :reason "POP with an empty register stack"))
+      (let ((l (reg-l vm)))
+        (when (> n l)
+          (setf n (1+ l)))
+        (let* ((x top)
+               (rvs (make-array (max n 1) :element-type '(unsigned-byte 64) :initial-element 0)))
+          (dotimes (i n)
+            (setf (aref rvs i) (reg vm i)))
+          (when (plusp n)
+            (setf (aref stack (1- tau)) (aref rvs (1- n))))
+          (let* ((new-l (min (+ x n) (reg-g vm)))
+                 (base (- tau x 1)))
+            (when (minusp base)
+              (error 'mmix-fault :reason "POP frame is larger than the register stack"))
+            (let ((regs (vm-registers vm)))
+              (dotimes (k (min new-l (+ x (if (plusp n) 1 0))))
+                (setf (aref regs k) (aref stack (+ base k))))
+              (loop for i from 0 below (max 0 (1- n))
+                    for dest = (+ x 1 i)
+                    while (< dest new-l)
+                    do (setf (aref regs dest) (aref rvs i)))
+              (setf (fill-pointer stack) base)
+              (set-special vm +r-l+ new-l)
+              (sync-stack vm)))))))))
+
+(defvar *save-specials*
+  (vector +r-b+ +r-d+ +r-e+ +r-h+ +r-j+ +r-m+
+          +r-r+ +r-p+ +r-w+ +r-x+ +r-y+ +r-z+)
+  "Specials pushed by SAVE, low address to high: rB first, rZ last.")
+
+(defun set-hidden-tau (vm tau)
+  "Make the hidden stack TAU octas long, filling a gap from the stack segment."
+  (when (or (minusp tau) (> tau #x100000))
+    (error 'mmix-fault :reason "UNSAVE image is not on the register stack"))
+  (let ((stack (vm-stack vm)))
+    (cond ((< tau (length stack))
+           (setf (fill-pointer stack) tau))
+          ((> tau (length stack))
+           (loop for k from (length stack) below tau
+                 do (vector-push-extend
+                     (mem-ref-u64 vm (+ +stack-segment+ (* 8 k)) :internal t)
+                     stack)))))
+  (sync-stack vm))
+
+(defun save-context (vm x)
+  "SAVE $X. Writes the §43 process image and leaves $X holding its top address.
+The whole image is one step-vm. Plan 05 will poll a phase and a count in rX
+when a trip arrives mid-save (α = β = γ, rO = rS, rL = 0, so the handler
+sees a fresh stack on a partial image). This function does not return
+mid-instruction."
+  (let ((g (reg-g vm))
+        (x (u8 x)))
+    (unless (>= x g)
+      (illegal-instruction))
+    ;; push-frame of register 255 uses the X ≥ rG arm: locals, then the old
+    ;; rL as the hole, then rL ← 0. The hole is that saved rL, not 255.
+    (push-frame vm 255)
+    (loop for k from g to 255
+          do (stack-push-octa vm (reg vm k)))
+    (loop for s across *save-specials*
+          do (stack-push-octa vm (special-reg vm s)))
+    (stack-push-octa vm (logior (ash (logand g #xff) 56)
+                                (logand (special-reg vm +r-a+) #xffffffff)))
+    (set-reg vm x (+ +stack-segment+ (* 8 (1- (length (vm-stack vm))))))
+    (sync-stack vm))
+  vm)
+
+(defun unsave-context (vm addr)
+  "UNSAVE 0,$Z. Reverses save-context. Reads vm-stack when ADDR is the current
+top octa (rO − 8), and memory when the image was moved. Restores rO to the
+address of the first saved local. One step-vm, same plan 05 hook as SAVE."
+  (let* ((addr (u64 addr))
+         (stack (vm-stack vm))
+         (tau (length stack))
+         (top (and (plusp tau)
+                   (+ +stack-segment+ (* 8 (1- tau)))))
+         (from-stack (and top (= addr top)))
+         (cursor addr))
+    (labels ((peek ()
+               (cond (from-stack
+                      (when (zerop (length stack))
+                        (error 'mmix-fault :reason "UNSAVE ran off the register stack"))
+                      (aref stack (1- (length stack))))
+                     ((minusp cursor)
+                      (error 'mmix-fault :reason "UNSAVE ran off the bottom of memory"))
+                     (t (mem-ref-u64 vm cursor :internal t))))
+             (next-octa ()
+               (prog1 (peek)
+                 (when from-stack
+                   (vector-pop stack))
+                 (decf cursor 8))))
+      (let* ((header (peek))
+             (g (ldb (byte 8 56) header))
+             (mid (ldb (byte 24 32) header))
+             (ra (logand header #xffffffff)))
+        (unless (and (>= g 32)
+                     (zerop mid)
+                     (zerop (ash ra -18)))
+          (illegal-instruction))
+        (next-octa)
+        (set-special vm +r-l+ 0)
+        (set-special vm +r-g+ g)
+        (set-special vm +r-a+ ra)
+        (loop for i from (1- (length *save-specials*)) downto 0
+              do (set-special vm (aref *save-specials* i) (next-octa)))
+        (loop for k from 255 downto g
+              do (set-reg vm k (next-octa)))
+        (let ((hole (next-octa)))
+          (unless (and (< hole 256) (<= hole g))
+            (illegal-instruction))
+          (set-special vm +r-l+ hole)
+          (loop for k from (1- hole) downto 0
+                do (set-reg vm k (next-octa))))
+        (if from-stack
+            (sync-stack vm)
+            (let ((base (+ cursor 8)))
+              (unless (and (>= base +stack-segment+)
+                           (zerop (mod (- base +stack-segment+) 8)))
+                (error 'mmix-fault :reason "UNSAVE image is not on the register stack"))
+              (set-hidden-tau vm (floor (- base +stack-segment+) 8)))))))
+  vm)
 
 (defun privileged-special-p (n)
   (member n '(8 9 10 11 12 13 14 15 16 17 18 22 7 28 29 30 31)))

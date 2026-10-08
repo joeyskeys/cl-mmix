@@ -4,6 +4,8 @@ A user-mode **MMIX** virtual machine in portable Common Lisp (tested on SBCL).
 
 It runs educational MMIXAL: the integer instruction set, the register stack, the four address segments, MMIX-SIM traps, and `.mmo` object files. It is not an MMIXware replacement: there is no pipeline, no virtual memory, and no IEEE floating point.
 
+What the code actually does, opcode by opcode, is written in [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md). The distance from that code to a full MMIX machine is [docs/TAOCP-GAP-ANALYSIS.md](docs/TAOCP-GAP-ANALYSIS.md), and the sequence of plans is [docs/plans/00-roadmap.md](docs/plans/00-roadmap.md).
+
 ## Features
 
 - 256 general registers with the `rL`/`rG` window (`rG` starts at 255, `rL` at 0). Marginal registers read as 0; writing one widens `rL` and zeros the gap.
@@ -27,6 +29,7 @@ cl-mmix/
   src/          package, util, machine, decode, trap, ops, asm, mmo, api
   tests/        assert-style tests (no FiveAM)
   scripts/run-demo.lisp
+  docs/         implementation guide, full-machine gap analysis, and plans/
   README.md
 ```
 
@@ -176,7 +179,7 @@ sbcl --script tests/run-tests.lisp
 
 ## Limitations
 
-A prioritized comparison with Knuth’s MMIX and the needs of TAOCP practice is in [docs/TAOCP-GAP-ANALYSIS.md](docs/TAOCP-GAP-ANALYSIS.md). The VM now implements the document's recommended user-mode target; these items remain deferred:
+[docs/TAOCP-GAP-ANALYSIS.md](docs/TAOCP-GAP-ANALYSIS.md) is the gap between this tree and a full machine (kernel, remaining opcodes, virtual memory, pipeline, and multi-core). [docs/plans/00-roadmap.md](docs/plans/00-roadmap.md) is the order of work. The largest holes:
 
 - Floating-point opcodes `#x01`–`#x17` and `LDSF`/`STSF` halt with `vm-fault` "floating point is not implemented".
 - `SAVE`/`UNSAVE` halt with "SAVE/UNSAVE is not implemented".

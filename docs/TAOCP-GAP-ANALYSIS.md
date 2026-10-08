@@ -1,322 +1,243 @@
-# cl-mmix vs MMIX: gap analysis for TAOCP practice
+# cl-mmix vs a full MMIX machine
 
-> **Implementation status:** This analysis describes the pre-implementation MVP. Its recommended user-mode compatibility target was implemented in September 2026. See the current [README](../README.md) and tests for the authoritative feature set and remaining limitations.
+This document is the gap between the sources described in [IMPLEMENTATION.md](IMPLEMENTATION.md) (ASDF system `cl-mmix` 0.9.0) and a complete MMIX. It replaces the older write-up, which compared an early MVP (flat registers, about 64 opcodes, a private putchar `TRAP`) with a user-mode practice target. That user-mode target is what the tree implements now. The paragraphs below describe what is still missing after it.
 
-Analysis only. This document records what the current code implements and what is still missing for a virtual machine that can be used to practice exercises from Knuth’s *The Art of Computer Programming* (TAOCP) with MMIX. It does not change the ISA.
+The work that closes each gap is a separate plan under [plans/](plans/00-roadmap.md).
 
-## Executive summary
+Analysis only. This file does not change the ISA.
 
-cl-mmix is a portable Common Lisp **educational MVP**: a flat 256-register file, a 1 MiB big-endian memory, a fetch–decode–execute loop, and about 64 opcodes covering straight-line integer arithmetic, a few loads and stores, branches, wyde immediates, and a private `TRAP` halt/putchar convention. That is enough to run the in-repo demos (`demo-sum-1-to-n`, `demo-factorial`). It is not enough to assemble or run the programs printed in Volume 1, Fascicle 1, or in Martin Ruckert’s *The MMIX Supplement*, which are ordinary MMIXAL (`.mms`) programs. Those programs depend on the register stack (`PUSHJ`/`POP`, `rL`/`rG`), `GET`/`PUT`, tetra and immediate loads and stores, the standard four address segments, and the MMIX-SIM system calls (`TRAP 0,Halt,0`, `TRAP 0,Fputs,StdOut`, and file I/O). Several opcodes that *are* implemented do not match Knuth’s encoding or semantics (branch map, shift counts, signed `DIV`, `GO` writing `rJ`). Calling the present VM “full MMIX” would be false.
+## What “full” means
 
-**Recommended compatibility target:** a **user-mode functional VM for educational MMIXAL programs**. Assemble with the external `mmixal` from MMIXware, load the resulting `.mmo`, and execute with correct integer instructions, the hardware register stack, the four standard segments, and the small MMIX-SIM `TRAP` I/O set (`Halt`, `Fputs`, `Fgets`, `Fopen`/`Fclose`/`Fread`/`Fwrite`). Keep the s-expression assembler as a test tool, but make it emit the same opcodes `mmixal` emits. Do **not** target “run MMIXware kernel / BIOS binaries,” cycle-accurate MMMIX, or virtual memory. IEEE floating point is the milestone after integer textbook programs run; Fascicle 1 introduces it, and Volume 2 needs it, but the first programming exercises do not. Pipeline timing is not required for practice: TAOCP asks students to count υ and μ by hand, and a functional instruction count is enough to check results.
+Three layers, all in scope:
+
+1. **The architecture** in Donald Knuth’s *MMIX: A RISC Computer for the New Millennium* (`mmix-doc`, version 1.0.0). Every opcode has its specified result, `rA` event, and trip. Special registers do what §39–43 say. Trips, forced traps, and dynamic traps follow §32–38. Virtual addresses follow §44–47. `SAVE`/`UNSAVE` follow §43. Running time can be reported in μ and υ as in §50.
+2. **The MMIXware simulators.** `mmix` is the user-mode functional simulator (MMIX-SIM): MMIX-SIM `TRAP` services, command-line arguments in `Pool_Segment`, an interactive session, and a startup `UNSAVE`. `mmmix` is the configurable pipeline (fetch, decode, execute, memory, write-back, caches, branch prediction). Its own introduction leaves out multiprocessing and the low-level details of memory-mapped I/O.
+3. **Several processors on one memory.** `mmix-doc` §31 says MMIX is designed for that case. `CSWAP` is the atomic primitive. `SYNC` is the ordering and cache-maintenance instruction. Neither shipped simulator runs more than one processor. A full machine in this repository includes a shared-memory multiprocessor, with the coherence protocol and the inter-processor interrupt bit chosen here, because the architecture leaves both to the implementation.
+
+Out of scope, and absent from the plans: proposals that change version 1.0.0 (a different `rV` layout, an `rKK` register, virtualization of negative addresses). Also out of scope: a general-purpose operating system beyond a kernel ROM that implements the MMIX-SIM services and the page-fault path. The hardware plans leave room for that ROM. They do not include a Unix.
 
 ## Sources
 
-Code (ground truth for “what we have”):
+Current behavior: [IMPLEMENTATION.md](IMPLEMENTATION.md), then `src/machine.lisp`, `src/decode.lisp`, `src/ops.lisp`, `src/trap.lisp`, `src/asm.lisp`, `src/mmo.lisp`, `src/api.lisp`, `tests/tests.lisp`.
 
-- `cl-mmix.asd`, `README.md`
-- `src/machine.lisp`, `src/decode.lisp`, `src/ops.lisp`, `src/asm.lisp`, `src/api.lisp`, `src/util.lisp`, `src/package.lisp`
-- `tests/tests.lisp`, `scripts/run-demo.lisp`
+Specification:
 
-Specification (ground truth for “what MMIX is”):
+- [mmix-doc](https://mmix.cs.hm.edu/doc/mmix-doc.pdf) and the [opcode chart](https://cs.stanford.edu/~knuth/mmop.html). Section numbers below are that document’s.
+- [MMIX-SIM](https://mmix.cs.hm.edu/doc/mmix-sim.pdf), the user-mode simulator and its interactive commands.
+- [MMMIX](https://mmix.cs.hm.edu/doc/mmmix.pdf), [mmix-pipe](https://mmix.cs.hm.edu/doc/mmix-pipe.pdf), and [mmix-config](https://mmix.cs.hm.edu/doc/mmix-config.pdf) for the pipeline and caches.
+- Special-register numbers: [registers.html](https://mmix.cs.hm.edu/doc/registers.html).
 
-- Donald E. Knuth, *MMIXware* / “MMIX: A RISC Computer for the New Millennium” (the architecture definition; quotes below are from the public `mmix-doc` text, sections cited inline). Stanford copies: [MMIX](https://cs.stanford.edu/~knuth/mmix.html), [opcode chart](https://cs.stanford.edu/~knuth/mmop.html), [MMIXware](https://cs.stanford.edu/~knuth/mmixware.html).
-- Donald E. Knuth, *The Art of Computer Programming*, Volume 1, Fascicle 1 (*MMIX*). The programmer-facing subset of the same machine. The architecture document is explicit that Fascicle 1 is the tutorial and that the full write-up also covers OS-only features.
-- MMIXware simulator documentation (`mmix-sim`): the rudimentary OS and interactive debugger that textbook programs assume. Public PDF mirror used here: [mmix-sim](https://mmix.cs.hm.edu/doc/mmix-sim.pdf). Hello-world trace confirming `Fputs`/`StdOut`: [MMIX Hello World](https://mmix.cs.hm.edu/examples/hello.html).
-- Opcode cross-check: [Knuth’s opcode page](https://cs.stanford.edu/~knuth/mmop.html) and the Munich MMIX register summary [registers.html](https://mmix.cs.hm.edu/doc/registers.html).
+Where this file and the code disagree, the code wins for “implemented” and `mmix-doc` wins for “specified.”
 
-Where the README and the code disagree with those documents, the documents win for “spec” and the code wins for “implemented.”
+## Baseline already in the tree
 
-## Status of the ten areas
+These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (50 checks) and must keep `make-vm` usable as a user-mode interpreter.
 
-| # | Area | Status | One-line evidence |
-| --- | --- | --- | --- |
-| 1 | General and special registers | **partial** | 256 flat `$` registers; 32 special slots exist; only `rR` and `rJ` are written, and `rJ` is written by the wrong instruction |
-| 2 | Instruction set | **partial** | 64 opcodes in `+op+`; branch numbers and several arithmetic rules do not match the opcode chart |
-| 3 | Memory model | **partial** | Big-endian byte memory, no alignment rule, no segments, OOB is a Lisp error |
-| 4 | Pipeline / timing | **partial** (enough for practice) | `vm-cycles` counts instructions; `run-vm` has `:max-cycles`. No υ/μ, no pipeline |
-| 5 | Floating point | **missing** | No FP opcodes, no rounding mode in `rA` |
-| 6 | Trips / traps / `TRAP` | **partial** | `TRAP 0,0,0` halts, which matches the architecture; every other `TRAP` is a private convention |
-| 7 | Calling convention / register stack | **missing** | No `PUSHJ`/`POP`, no `rL`/`rG` window, no `rO`/`rS` |
-| 8 | Assembler / loader | **partial** | S-expression assembler only; no MMIXAL, no `.mmo` |
-| 9 | Debugging / learner UX | **partial** | `step-vm`, `disassemble-at`, `dump-registers`, `dump-memory`; no breakpoints or special-register dump |
-| 10 | Compatibility target | **not MMIXAL, not MMIXware** | In-repo programs only. Recommendation is in the summary above |
+- All 256 opcode bytes are named in `src/decode.lisp`.
+- Integer arithmetic, shifts, compares, bitwise ops, wyde immediates, conditional sets, branches (including backward and probable forms), `JMP`/`GETA`/`GO`/`PUSHJ`/`PUSHGO`/`POP`, tetra and immediate loads and stores, `LDHT`/`STHT`/`STCO`/`CSWAP`/`MOR`/`MXOR`.
+- The `rL`/`rG` window, a Lisp register stack, and `rO`/`rS` kept consistent with `Stack_Segment + 8*tau`.
+- `GET`/`PUT`/`PUTI` with the user-mode restrictions. `rA` event and enable bits. `TRIP` and `RESUME` with `XYZ = 0`, in a simplified form (see plan 02).
+- Four segments, sparse 4096-byte grow-on-touch chunks, a page budget (`:memory-size`, default `#x2000000`). Those chunks are an allocator granule. They are not architectural pages (`2^s` with `s ≥ 13`).
+- MMIX-SIM `TRAP` services Y = 0…10, intercepted in Lisp. Handles 0–2 are StdIn, StdOut, StdErr. Legacy putchar is opt-in.
+- S-expression assembler, `.mmo` loader, breakpoints, `step-vm` / `run-vm` / `continue-vm`, dumps.
 
-## What’s already solid
+`vm-cycles` counts retired instructions. `vm-mems` counts loads and stores. That is a runaway guard and a rough mem count. It is not μ/υ, and it is not a pipeline.
 
-These pieces match the architecture and are worth keeping.
+## Catalog
 
-**Machine shape.** Instructions are 32-bit `OP X Y Z` (`decode`, `encode` in `src/decode.lisp`). General registers are an array of 256 unsigned 64-bit values (`vm-registers` in `src/machine.lisp`). There is no wired-zero register, which is correct: MMIX `$0` is an ordinary local. Special-register *numbers* that the code does define match Knuth: `rJ` = 4, `rR` = 6, `rG` = 19, `rL` = 20, `rA` = 21 (`src/machine.lisp`). The special file is 32 slots, one per architectural register `rB` through `rZZ`.
+| Plan | Gap | Current | Full target |
+|------|-----|---------|-------------|
+| [01](plans/01-floating-point.md) | Floating point | `#x01`–`#x17`, `LDSF`, `STSF` halt with `vm-fault` | IEEE binary64 and binary32 load/store, four rounding modes, events `WIOUZX` |
+| [02](plans/02-trips-and-resume.md) | Trips and `RESUME 0` | Trip enters a vector; `rX` is the raw tetra; `RESUME` always jumps to `rW` | §35 and §38: negative `rX`, `$255 ← rJ`, ropcodes 0–2 |
+| [03](plans/03-save-unsave.md) | `SAVE` / `UNSAVE` | Fault "SAVE/UNSAVE is not implemented" | §43 context image; interruptible spill once traps exist |
+| [04](plans/04-machine-specials.md) | `rC` `rF` `rI` `rN` `rU` | Slots exist and stay 0; `PUT` ignores them | Interval timer, usage counter, frozen serial, failure address, continuation page |
+| [05](plans/05-kernel-traps.md) | Forced and dynamic traps | `TRAP` is a Lisp syscall; bit 63 halts; privileged `PUT` is a silent no-op | `rT` / `rTT`, `rK`/`rQ`, `rwxnkbsp`, `RESUME 1`, kernel ROM for MMIX-SIM |
+| [06](plans/06-virtual-memory.md) | `rV` translation | Flat segments; `LDVTS` returns 0 | PTEs, PTPs, protection, translation caches, MMIO at physical `≥ 2^48` |
+| [07](plans/07-cache-and-sync.md) | Caches and `SYNC` | `PRE*`/`SYNC*`/`LDUNC`/`STUNC` are nops or plain octas | §30–31 on one processor: caches, prefetch, ordering, privileged `SYNC` |
+| [08](plans/08-timing-costs.md) | μ and υ | One counter per instruction, one per load/store | §50 costs, including mispredicted branches |
+| [09](plans/09-mmixal.md) | MMIXAL | S-expressions only; `.mmo` loads | `.mms` in process: `LOC`, `GREG`, `IS`, local labels, expressions, `PREFIX` |
+| [10](plans/10-simulator-session.md) | MMIX-SIM session | Library API, raw file bytes, no argv | Text newlines, `argc`/`argv`, interactive commands, profile |
+| [11](plans/11-pipeline.md) | Pipeline | One instruction retires before the next is fetched | Configurable F–D–X–M–W pipeline, one core, as in MMMIX |
+| [12](plans/12-multicore.md) | Several processors | One `vm` struct | Shared physical memory, atomic `CSWAP`, `SYNC` fences, per-core `rQ` |
 
-**Big-endian memory.** `mem-ref-u*` / `mem-set-u*` are big-endian (`src/machine.lisp`). `mmix-doc` §6 requires big-endian. `tests/tests.lisp` (`mem-be-u64`) locks this in. Byte, wyde, and octa load/store of *aligned* data in the low megabyte work (`:ldb`/`:ldbu`, `:ldw`/`:ldwu`, `:ldo`/`:ldou`, `:stb`, `:stw`, `:sto` in `execute`).
+Dependency order is in the [roadmap](plans/00-roadmap.md). Plans 01, 02, 03, 08, and 09 can start from today’s tree. Plans 05–07, 11, and 12 stack.
 
-**Integer ops that match on the values the tests use.**
+## Opcodes that still fault
 
-- `ADD`/`SUB`/`MUL` low 64 bits wrap the way two’s-complement low halves do (`u64` in `src/util.lisp`). The low half of a product is the same for signed and unsigned multiply, so `MUL`’s destination register is right when the product fits.
-- `AND`/`OR`/`XOR` and their immediate forms.
-- `CMP`/`CMPU` return −1, 0, or +1 (`cmp-signed`, `cmp-unsigned`). Immediate `Z` is an unsigned byte, which matches `mmix-doc` §5 (“immediate constants are always nonnegative”).
-- Wyde `SETH`/`SETMH`/`SETML`/`SETL` replace the whole register (other wydes cleared). `INC*` adds a shifted wyde. `OR*` ors a shifted wyde. That is `mmix-doc` §13, including the idiom `SETH; INCMH; INCML; INCL` for a 64-bit constant.
-- `SET $X,$Y` in the assembler is `ORI $X,$Y,0` (`src/asm.lisp`), which copies `$Y` without depending on `$0`. That is the right expansion.
-- Branch *conditions* (sign bit, zero, odd bit) match the eight predicates in `mmix-doc` §17. Treating a probable branch as the same predicate is also correct for a functional machine; `P*` is only a timing hint. The opcode *numbers* are a different story (see P0).
+`execute` in `src/ops.lisp` sends these to `unimplemented`, which signals `mmix-fault`. `step-vm` stores the reason in `vm-fault` and halts. `run-vm` does not resignal it as a Lisp error.
 
-**Control loop.** `fetch` reads a tetra at `PC`. `step-vm` increments `vm-cycles`. `run-vm` stops on halt or signals if `:max-cycles` is exceeded (default 100000). `reset-vm` clears PC, halt, cycles, and the output buffer. Demos and tests show loops, factorial, and a character-output trap working *under the in-repo convention*.
+| Bytes | Names | Fault string |
+|-------|--------|----------------|
+| `#x01`–`#x17` | `FCMP` `FUN` `FEQL` `FADD` `FIX` `FSUB` `FIXU` `FLOT`/`FLOTI` `FLOTU`/`FLOTUI` `SFLOT`/`SFLOTI` `SFLOTU`/`SFLOTUI` `FMUL` `FCMPE` `FUNE` `FEQLE` `FDIV` `FSQRT` `FREM` `FINT` | "floating point is not implemented" |
+| `#x90`–`#x91` | `LDSF`/`LDSFI` | "LDSF is not implemented" |
+| `#xB0`–`#xB1` | `STSF`/`STSFI` | "STSF is not implemented" |
+| `#xFA`–`#xFB` | `SAVE`/`UNSAVE` | "SAVE/UNSAVE is not implemented" |
+| `#xF9` with `XYZ ≠ 0` | `RESUME 1` and any other Z | "RESUME with a nonzero XYZ is not implemented" |
 
-**Debugger seeds.** `disassemble-at`, `dump-registers` (nonzero `$` registers, PC, cycles, halt, output), and `dump-memory` (16-byte hex rows) are the right kinds of tools. They are not yet a practice session.
+Everything else has a handler. Several handlers are the functional single-processor approximation of an instruction whose real effect is a cache, a pipe drain, a translation cache, or a kernel entry. Those are gaps of meaning, listed below, and they are not missing names in `*op-name*`.
 
-## Correctness bugs inside the implemented subset
+### Floating point (§21–28, plan 01)
 
-These are not “missing features.” Code that claims to be MMIX already disagrees with the spec. Fixing them is part of P0 because textbook listings and `mmixal` output will otherwise do the wrong thing, and because our own branch opcodes are not Knuth’s.
+Binary64: sign, 11-bit exponent, 52-bit fraction. Short float is binary32, loaded and stored by `LDSF`/`STSF` and widened to binary64 in registers. Rounding is `rA` bits 17–16: 00 nearest/even, 01 toward 0, 10 toward +∞, 11 toward −∞. Conversions take a per-instruction override in `Y` (`ROUND_OFF`, `ROUND_UP`, `ROUND_DOWN`, `ROUND_NEAR`). `FCMPE`, `FUNE`, and `FEQLE` consult `rE`.
 
-1. **Branch and jump encoding.** `mmix-doc` §17–19 and the [opcode chart](https://cs.stanford.edu/~knuth/mmop.html): a forward branch adds `4 * YZ` (YZ unsigned); the backward opcode (mnemonic ending in `B`) adds `4 * (YZ − 2^16)`. The same split applies to `JMP`/`JMPB` (24-bit) and `GETA`/`GETAB`. Probable branches start at `#50`, not `#48`.
+Exceptions set `W I O U Z X`. Overflow always also raises `X`. Underflow raises `U` and `X` when underflow is disabled, and may raise both when it is enabled. If both enables are set, the overflow or underflow handler runs and the inexact handler does not. Common Lisp floats are the wrong representation: NaN payloads, signed zero, and the rounding modes have to be bit operations on octas.
 
-   `+op+` in `src/decode.lisp` assigns `#41` to `:bnz`, `#43` to `:bnn`, `#45` to `:bnp`, `#47` to `:bev`, and `#48`–`#4D` to probable branches. On the real map those bytes are `BNB`, `BZB`, `BPB`, `BODB`, `BNN`, `BNNB`, `BNZ`, `BNZB`, `BNP`, `BNPB`. Real `BNZ` is `#4A`, real `BEV` is `#4E`, real `PBN` is `#50`. `PBOD`/`PBEV` (`#56`/`#5E`) are absent. `take-branch` and the assembler sign-extend YZ (`sign-extend16`, `branch-offset` in `src/ops.lisp` and `src/asm.lisp`). That happens to agree with MMIX only for a forward opcode and a displacement in −32768 … 32767, and only if the program was assembled *by this assembler*. A `.mmo` file uses the backward opcode instead.
+### `SAVE` / `UNSAVE` (§43, plan 03)
 
-   `JMP` (`#F0`) sign-extends a 24-bit field (`sign-extend24`). Real backward jumps are `JMPB` (`#F1`). `GETAB` (`#F5`) is missing; `GETA` sign-extends.
+`SAVE $X,0` pushes locals as `PUSHGO` with `X = 255` would, sets `rL ← 0`, pushes `$G`…`$255`, then `rB rD rE rH rJ rM rR rP rW rX rY rZ`, then one octa packing `rG` in the top byte and `rA` in the low tetra. `$X` (a global) receives the address of that top octa. Afterwards `rO = rS` and the register stack is empty.
 
-2. **`GO` writes `rJ`.** `mmix-doc` §19: `GO` sets `$X ← λ+4` and jumps to `$Y+$Z` (low two bits of the target are ignored). It does **not** write `rJ`. `rJ` is written by `PUSHJ`/`PUSHGO` (`mmix-doc` §29). `execute` for `:go` and `:goi` does `(set-special vm +r-j+ next-pc)`. The two low bits of the target are not cleared.
+`UNSAVE 0,$Z` restores that image. It is destructive: a second `UNSAVE` of the same image is not reliable. Both instructions are interruptible in the architecture. The official loader starts a process by `UNSAVE` of a fabricated image (MMIX-SIM §37). Today `load-mmo` applies `lop_post` directly and sets `PC` from `Main`.
 
-3. **Shifts use `mod 64`.** `mmix-doc` §14: a count ≥ 64 yields 0, except `SR` of a negative value, which yields −1. `SL` also raises integer overflow unless the source was 0. `execute` uses `(mod count 64)` for `SL`/`SR`/`SRU` and never touches `rA`. `SLU` (`#3A`/`#3B`) is not implemented.
+### Trips that do not match §35 (plan 02)
 
-4. **`DIV` is not MMIX `DIV`.** `mmix-doc` §20: signed quotient is floor(y/z) (remainder has the sign of the divisor); `rR` receives the remainder; division by zero sets `$X ← 0` and `rR ← $Y` and raises integer divide check; `−2^63 / −1` overflows. `execute` runs Common Lisp `truncate` on the raw unsigned register values (toward zero, unsigned). On a zero divisor it sets `$X` to the dividend and `rR` to 0 — the opposite assignment. `DIVU` (128-bit dividend in `rD`) is missing. `MULU` does not write `rH`.
+`do-trip` in `src/machine.lisp` writes `rB ← $255`, `rW ← PC+4`, `rX ←` the raw tetra, `rY`/`rZ` from the keyword arguments, and `PC ←` the vector. `signal-event` ORs the event bit into `rA` and then trips when the enable is set.
 
-5. **`ADD`/`SUB`/`MUL`/`SL` never report overflow.** The implemented opcodes are the signed ones (`ADD` is `#20`, which must signal V in `rA` when the mathematical result is outside `[−2^63, 2^63)`). The code wraps modulo `2^64` and leaves `rA` at 0, so it behaves like `ADDU` under the `ADD` opcode. `ADDU` itself (`#22`) is missing, and MMIXAL emits `ADDU` for `LDA` and for address arithmetic (`mmix-doc` §7).
+§35 differs in all of the following:
 
-6. **Loads and stores do not force alignment.** `mmix-doc` §6–8: a `2^t`-byte access uses address `k` with the low `t` bits cleared (rounded down), not a trap and not a split access. `mem-ref-u16` and friends use the address as given. Signed stores (`STB`/`STW`, and the missing `STT`) must raise integer overflow when the register value does not fit the signed width; the unsigned variants (`STBU`, …) skip that check. Our `STB`/`STW` store the low bytes and never set `rA`, so they implement the unsigned variant under the signed opcode.
+- A `TRIP` sets the high tetra of `rX` to `#x80000000`, sets `rY ← $Y` and `rZ ← $Z` (register contents, not the Y and Z fields), sets `rB ←` the old `$255`, and sets `$255 ← rJ`.
+- An enabled arithmetic exception does the same kind of entry at `16, 32, …, 128`. The event bit records an exception that was **not** tripped. An enabled exception therefore trips with that event bit left clear.
+- Instructions at negative virtual addresses do not take trip handlers.
+- Store trips put the virtual address in `rY` and the full octa that would be stored in `rZ`.
 
-7. **`TRAP 0,1,…` is not `Fopen`.** See area 6. Halt is the one compatible case.
+`RESUME` with `XYZ = 0` (§38): if `rX` is negative, fetch at `rW`. If `rX` is nonnegative, insert the low tetra of `rX` as if it stood at `rW−4`, under the ropcode in the high byte of `rX`. Ropcode 0 inserts it. Ropcode 1 substitutes `rY` and `rZ` as the operands. Ropcode 2 sets `$X ← rZ` and raises the exception bits in bits 47–40 of `rX` (the third byte from the left). Today every `RESUME 0` jumps to `rW` and ignores `rX`.
 
-The tests in `tests/tests.lisp` pass for the in-repo encoding (small positive immediates, no backward MMIXAL branches, no `DIV`, no shift by ≥ 64). They do not detect the mismatches above.
+`GET` and `PUT` require `Y = 0`. A nonzero `Y` is an illegal instruction. The handlers ignore `Y`.
 
-## Area notes
+## Kernel, traps, and specials that stay zero
 
-### 1. General and special registers — partial
+### Forced traps (§36, plan 05)
 
-Spec (`mmix-doc` §29, §40–43; opcode-page special-register table):
+An architectural `TRAP` clears `rK`, saves `rBB`, `rWW`, `rXX`, `rYY`, `rZZ`, and jumps to `rT`. `XYZ = 0` terminates the process. `XYZ = 1` asks the operating system for the default trip action. MMIX-SIM defines Y = 1…10 as file services when X = 0, and the current `exec-trap` performs those services in Lisp without ever writing `rT` or `rK`.
 
-- `$0`–`$255`. With counters `L = rL` and `G = rG` (`0 ≤ L ≤ G ≤ 255`, and `G ≥ 32`): `$0`…`$(L−1)` local, `$L`…`$(G−1)` marginal, `$G`…`$255` global.
-- A marginal register reads as 0. Writing marginal `$x` sets `rL ← x+1` and zeros the registers in between.
-- `PUT rL` can only decrease `rL`. `G` is fixed at load time from the program’s `GREG`s and may be changed later with `PUT`.
-- 32 specials: `rB rD rE rH rJ rM rR rBB rC rN rO rS rI rT rTT rK rQ rU rV rG rL rA rF rP rW rX rY rZ rWW rXX rYY rZZ` (numbers 0–31 as on the opcode page).
-- `rA` layout (`mmix-doc` §32): bits 17–16 are the rounding mode (00 nearest/even, 01 toward 0, 10 toward +∞, 11 toward −∞). Bits 8–15 are enable bits and bits 0–7 are event bits, each the eight flags `DVWIOUZX` (integer divide check, integer overflow, float-to-fix, invalid, float overflow, float underflow, float divide by zero, inexact).
-- `rO` and `rS` are the register-stack offset and pointer (`mmix-doc` §42), usually aimed at `Stack_Segment`.
+A full machine keeps both facts. `TRAP` enters the kernel. A ROM at a negative address implements Halt and the file services, then `RESUME 1`. Existing user programs still see `$255` results. Tests that expect an immediate halt on `TRAP 0,0,0` keep working because the ROM halts.
 
-Code: `reg`/`set-reg` index a flat vector. Nothing consults `rL` or `rG`. `make-vm` zeros every special, so `rG` is 0 rather than a legal threshold (≥ 32, and 255 when the program allocated no globals). `special-reg`/`set-special` exist but are not exported. `execute` writes `rR` on `DIV` and `rJ` on `GO` only. There is no `GET` (`#FE`) or `PUT` (`#F6`/`#F7`), so a program cannot even move `rR` into a general register after division.
+Software emulation of an opcode, and software page translation, are also forced traps. The high tetra of `rXX` is `#x02000000` for an emulated operation and `#x03000000` when the handler must supply a page-table entry. `RESUME 1` with ropcode 2 or 3 finishes the instruction. Neither encoding exists today.
 
-### 2. Instruction set — partial
+### Dynamic traps (§37, plan 05)
 
-Knuth’s chart has 256 opcodes (`mmop.html`). `+op+` lists 64 distinct bytes plus the `SET` pseudo, which shares `ORI` (`#C1`). Roughly a quarter of the map has a handler; several of those handlers are semantically wrong (previous section).
+`rQ` and `rK` are 64 bits:
 
-**Implemented (mnemonic as coded, not as in the chart when they differ):**
+```
+24 low-priority I/O | 8 program | 24 high-priority I/O | 8 machine
+```
 
-| Group | Opcodes in `+op+` / `execute` |
-| --- | --- |
-| Trap | `TRAP` `#00` |
-| Multiply / divide | `MUL` `#18`, `MULI` `#19`, `DIV` `#1C`, `DIVI` `#1D` |
-| Add / sub | `ADD` `#20`, `ADDI` `#21`, `SUB` `#24`, `SUBI` `#25` |
-| Compare | `CMP` `#30`, `CMPI` `#31`, `CMPU` `#32`, `CMPUI` `#33` |
-| Shift | `SL` `#38`, `SLI` `#39`, `SR` `#3C`, `SRI` `#3D`, `SRU` `#3E`, `SRUI` `#3F` |
-| Branch | `#40`–`#47` as `BN BNZ BZ BNN BP BNP BOD BEV`; `#48`–`#4D` as `PBN PBNZ PBZ PBNN PBP PBNP`. No `#4E`/`#4F` |
-| Load | `LDB` `#80`, `LDBU` `#82`, `LDW` `#84`, `LDWU` `#86`, `LDO` `#8C`, `LDOU` `#8E` (register+register address only) |
-| Go | `GO` `#9E`, `GOI` `#9F` |
-| Store | `STB` `#A0`, `STW` `#A4`, `STO` `#AC` |
-| Logic | `OR` `#C0`, `ORI` `#C1`, `XOR` `#C6`, `XORI` `#C7`, `AND` `#C8`, `ANDI` `#C9` |
-| Wyde | `SETH`…`SETL` `#E0`–`#E3`, `INCH`…`INCL` `#E4`–`#E7`, `ORH`…`ORL` `#E8`–`#EB` |
-| Jump / address | `JMP` `#F0`, `GETA` `#F4` |
+The program byte is `rwxnkbsp`: read, write, execute, negative address, kernel-privileged, bad instruction, security, privileged address. When `rQ ∧ rK ≠ 0` the machine takes a precise trap through `rTT`, using the same bootstrap registers as a forced trap. An instruction that traps with `x`, `k`, or `b` does nothing. A load that traps with `r` or `n` yields 0. A store that traps with any program bit stores nothing.
 
-**Major missing groups** (names from the opcode chart):
+A security violation (`s`) occurs when an instruction at a nonnegative address runs while any `rwxnkbsp` bit of `rK` is clear. The operating system is the only code that runs with interrupts suppressed, because a `TRAP` clears `rK` and only `RESUME 1` (from a negative address) reloads it from `$255`.
 
-- Floating point: `FCMP FUN FEQL FADD FIX FSUB FIXU FLOT* SFLOT* FMUL FCMPE FUNE FEQLE FDIV FSQRT FREM FINT` (`#01`–`#17`).
-- Unsigned and scaled arithmetic: `MULU DIVU ADDU SUBU 2ADDU 4ADDU 8ADDU 16ADDU NEG NEGU SLU` and their immediate forms. `LDA` is `ADDU` (`mmix-doc` §7).
-- Conditional assignment, the usual branchless idiom in Fascicle 1: `CSN CSZ CSP CSOD CSNN CSNZ CSNP CSEV` and `ZSN`…`ZSEV`, plus immediates (`#60`–`#7F`).
-- Tetra (32-bit) memory, which MMIX programs use constantly: `LDT LDTU STT STTU` and immediates. Also `LDHT STHT STCO LDSF STSF`.
-- The immediate memory opcodes (`LDBI`, `LDOI`, `STOI`, …). MMIXAL turns `LDO $X,base,8` into an immediate form. The README already warns that the MVP expects a zero register as the offset.
-- Bitwise completeness: `ANDN ORN NOR NAND NXOR`, the wyde `ANDN*`, `BDIF WDIF TDIF ODIF`, `MUX` (`rM`), `SADD`, `MOR`, `MXOR`.
-- Register stack and specials: `PUSHJ PUSHJB PUSHGO PUSHGOI POP SAVE UNSAVE GET PUT PUTI`.
-- Jumps: `JMPB`, `GETAB`, all backward `B*`/`PB*`.
-- System and synchronization: `TRIP RESUME SYNC SWYM SYNCD SYNCID`, plus `CSWAP` (`rP`), `LDVTS`, `LDUNC STUNC PRELD PREGO PREST`.
+Today bit 63 of an address signals `mmix-fault` and halts. `PUT` of `rC`, `rN`, `rO`, `rS`, `rI`, `rT`, `rTT`, `rK`, `rQ`, `rU`, `rV`, `rF`, `rBB`, `rWW`, `rXX`, `rYY`, `rZZ` returns without writing and without an interrupt (`privileged-special-p` in `src/machine.lisp`). §43 distinguishes three outcomes: a successful write, an illegal-instruction interrupt (`b`), and a privileged-operation interrupt (`k`) for `rC rI rK rQ rT rU rV rTT` when the privilege bit of `rK` is set. `rN`, `rO`, and `rS` are never writable. `PUT rQ` cannot clear a bit that came on after the last `GET` of `rQ`.
 
-`SWYM` is a no-op (and `SYNC` with `XYZ ≤ 3` is a functional no-op on a single-threaded VM). They are trivial once the decoder stops raising “unimplemented opcode,” but they are not what blocks textbook programs.
+### Machine specials (§40–42, §45, §48, plan 04)
 
-### 3. Memory model — partial
+| Register | Specified role | Today |
+|----------|----------------|-------|
+| `rN` | Version in the high three bytes, Unix time of this instance in the low five. Frozen | 0 |
+| `rI` | Decrements; at 0 it requests the interval interrupt (bit 6 of `rQ`, the next-to-leftmost bit of the machine byte) | 0, no decrement |
+| `rU` | Usage pattern, mask, and 47-bit count of retired opcodes that match | 0 |
+| `rC` | Physical continuation page, PTE-shaped, used when a register-stack spill would fault | 0 |
+| `rF` | Physical address of a memory fault (parity and similar), often unrelated to `rW` | 0 |
+| `rK` | Interrupt mask. Cleared by `TRAP`. User programs need it all-ones to avoid an `s` trap | 0, ignored |
+| `rQ` | Interrupt requests | 0 |
+| `rT`, `rTT` | Forced-trap and dynamic-trap entry | 0 |
+| `rV` | Page-table root, page size, address-space number, software-translation flag | 0 |
 
-Spec (`mmix-doc` §6, §44; `mmix-sim` loader):
+The local-register ring in §42 (256, 512, or 1024 locals, pointers α, β, γ derived from `rO`, `rS`, and `rL`) is an implementation of the same stack the Lisp vector already exposes to `PUSH`/`POP`. It becomes observable when a spill or a `SAVE` is interrupted, and when `rS` walks into a page the process cannot write. That behavior belongs with plans 03, 04, and 06, not with a second register file hidden beside a correct `POP`.
 
-- Virtual memory is `2^64` bytes, big-endian, naturally aligned by masking.
-- User addresses fall in four `2^61`-byte segments. The simulator’s names (`mmix-sim` § on interactive commands, and the hello-world programs) are:
-  - `Text_Segment` = `#0` (user code conventionally at `#100`, because `#00`, `#10`, … `#80` are trip vectors; `mmix-doc` §35)
-  - `Data_Segment` = `#2000000000000000`
-  - `Pool_Segment` = `#4000000000000000`
-  - `Stack_Segment` = `#6000000000000000` (register-stack spill and the software stack)
-- Negative virtual addresses are kernel-only and map by clearing the sign bit. Physical addresses ≥ `2^48` are reserved for memory-mapped I/O.
-- Page protections (`r`, `w`, `x`, …) and `rV` translation are OS machinery.
+## Virtual memory (§44–47, plan 06)
 
-Code: `make-vm` allocates one zero-filled byte array, default `#x100000` (1 MiB). `check-addr` signals a Lisp error on an out-of-range access. There is no sparse map, so a `LOC Data_Segment` address cannot be represented. No permission bits, no `rV`, no MMIO. Endianness and the byte/wyde/octa helpers are the part that should stay.
+Nonnegative virtual addresses sit in four `2^61`-byte segments (text, data, pool, stack). The machine maps each through φ. Negative virtual addresses are privileged and map by clearing bit 63: φ(A) = A ∧ `#x7fffffffffffffff`. Physical addresses `≥ 2^48` are memory-mapped I/O and are never cached.
 
-A practice VM does **not** need the page-table hardware. It does need the four segments, because every MMIXAL program in the books uses `LOC Data_Segment` and `GREG @`.
+`rV` is `b1 b2 b3 b4 s r n f` (4+4+4+4+8+27+10+3 bits). Page size is `2^s` with `13 ≤ s ≤ 48`. `f = 0` translates in hardware. `f = 1` forces a trap so software can translate; `b1`…`b4` and `r` are then ignored by the hardware. `f > 1` is a protection failure.
 
-### 4. Pipeline / timing — partial, and functional is the right goal
+A page-table entry holds a physical page number, an address-space number `n` that must match `rV`, and protection `pr pw px`. A page-table pointer is a negative octa pointing at the next level. The first 1024 pages of a segment can sit in the root; larger page numbers walk auxiliary tables. `n` mismatch or a missing permission is a protection fault (`r`, `w`, or `x` in `rQ`).
 
-`mmix-doc` §45 assigns costs in υ (oops) and μ (mems): most arithmetic is 1υ, `MUL` is 10υ, `DIV` is 60υ, loads and stores add memory references, taken branches cost more than untaken ones, and `PB*` reverses that guess. Fascicle 1 exercises ask the student to compute those costs by hand. The meta-simulator MMMIX (pipelines, caches, branch prediction) is a research tool in MMIXware, not something a reader needs in order to check an exercise.
+A translation cache remembers recent pages, separately for instructions and data. `LDVTS` looks up a key, optionally replaces the protection nybble, and returns 0, 1, 2, or 3 according to which cache held the key. `SYNC` with `XYZ = 6` drops those caches. Today `LDVTS` writes 0 and allocates nothing.
 
-What we have: `vm-cycles` increments once per retired instruction (`step-vm`), and `run-vm` aborts at `:max-cycles`. That is a runaway guard, not a timing model. For TAOCP practice, keep the instruction count, and later add a separate memory-reference count if you want output comparable to `mmix`’s “instructions, mems, oops” line. Do not build a pipeline for the practice target.
+The 4096-byte vectors in `vm-memory` can remain the physical backing store. They must stop being the virtual address space once `rV` is live. Default `make-vm` keeps today’s identity map of the four segments so the existing tests do not build page tables.
 
-### 5. Floating point — missing
+## Caches, ordering, and one-processor `SYNC` (§30–31, plan 07)
 
-`mmix-doc` §21–28 specifies IEEE-754 binary64 (sign, 11-bit exponent, 52-bit fraction) with the MMIX choices for NaNs, signed zeros, and overflow (O always also raises X). Operations: `FADD FSUB FMUL FDIV FREM FSQRT FINT FCMP FEQL FUN` and the epsilon forms `FCMPE FEQLE FUNE` (`rE`), plus conversions `FLOT FIX FIXU SFLOT` and short-float load/store `LDSF`/`STSF`. Rounding comes from `rA` bits 17–16, with per-instruction overrides in the `Y` field of the single-operand conversions (`ROUND_OFF/UP/DOWN/NEAR`). Exceptions update `rA` and, if enabled, trip to fixed handlers at 16, 32, …, 128.
+On a machine with a write buffer or a write-back data cache:
 
-None of this is in `src/`. Common Lisp floats are not a substitute: MMIX requires the IEEE bit patterns, the four rounding modes, and the exact NaN quieting rule in `mmix-doc` §22. Implement this after the integer machine can run book programs. It becomes mandatory for the floating-point section of Fascicle 1 and for Volume 2.
+- `PRELD` / `PREGO` / `PREST` bring a span of `X+1` bytes into the appropriate cache.
+- `SYNCD` from a nonnegative address writes that span back. From a negative address it also evicts the span.
+- `SYNCID` from a nonnegative address makes the span match what the instruction cache will fetch. From a negative address it discards the span, including dirty lines.
+- `LDUNC` / `STUNC` bypass the cache. `STCO` and ordinary stores may sit in a write buffer until a drain.
 
-### 6. Interruptions, trips, and `TRAP` — partial
+`SYNC` on one processor:
 
-Three mechanisms (`mmix-doc` §32–37):
+| XYZ | Effect |
+|-----|--------|
+| 0 | Stall until earlier instructions have finished |
+| 1 | Earlier stores complete before later stores |
+| 2 | Earlier loads complete before later loads |
+| 3 | Earlier memory operations complete before later ones |
+| 4 | Power-save until a wake-up. Privileged |
+| 5 | Clean data caches into memory. Privileged |
+| 6 | Drop translation caches. Privileged |
+| 7 | Drop instruction and data caches, discarding dirty data. Privileged |
+| > 7 | Illegal instruction |
 
-- **Trip** (user handler): `TRIP` (`#FF`) and enabled arithmetic exceptions. State goes to `rB`, `rW`, `rX`, `rY`, `rZ`; control goes to address 0 for `TRIP`, or to `16 * bitindex` for `D V W I O U Z X`. Return with `RESUME` (`#F9`).
-- **Forced trap** (kernel): `TRAP` (`#00`) clears `rK`, saves `rBB rWW rXX rYY rZZ`, and jumps to `rT`. `mmix-doc` §33 predefines only two architecturally: `XYZ = 0` terminates the user process, `XYZ = 1` is the default trip handler’s way of asking the OS for help.
-- **Dynamic trap**: bits in `rQ` masked by `rK` (the `rwxnkbsp` program bits plus I/O and machine bits) jump through `rTT`.
+`XYZ ≥ 4` from a user address raises the privileged-instruction interrupt (`k`) unless that interrupt is disabled. Today every `SYNC`, `SYNCD`, `SYNCID`, `PRELD`, `PREGO`, and `PREST` retires as a no-op, and `LDUNC`/`STUNC` are `LDOU`/`STOU`.
 
-The program a student actually writes does **not** install that kernel path. MMIXware’s user-mode simulator intercepts `TRAP` and performs the call itself (`mmix-sim`). The Y-field opcodes, from the simulator’s `Halt, Fopen, Fclose, Fread, Fgets, Fgetws, Fwrite, Fputs, Fputws, Fseek, Ftell` table, are:
+`CSWAP` already updates one octa and `rP` inside a single `step-vm`. It is atomic only because nothing else runs. Plan 12 makes that atomic across processors.
 
-| Y | Call | Notes |
-| --- | --- | --- |
-| 0 | `Halt` | `TRAP 0,Halt,0`. Also the architectural “terminate” case |
-| 1 | `Fopen` | handle in Z; name and mode are octas at the address in `$255` |
-| 2 | `Fclose` | |
-| 3 | `Fread` | buffer and size at `$255` |
-| 4 | `Fgets` | |
-| 5 | `Fgetws` | wyde characters |
-| 6 | `Fwrite` | |
-| 7 | `Fputs` | `$255` is the string address; Z is the handle; result returned in `$255` |
-| 8 | `Fputws` | |
-| 9 | `Fseek` | |
-| 10 | `Ftell` | |
+## Time (§50, plans 08 and 11)
 
-`StdIn = 0`, `StdOut = 1`, `StdErr = 2`, already open. Modes are `TextRead`, `TextWrite`, `BinaryRead`, `BinaryWrite`, `BinaryReadWrite`. The hello-world encoding `TRAP 0,Fputs,StdOut` is the tetra `#00000701` ([example trace](https://mmix.cs.hm.edu/examples/hello.html)).
+§50 assigns fixed costs so a student can check a program by hand:
 
-Code (`exec-trap` in `src/ops.lisp`, table in `README.md`):
+| Operation | Cost |
+|-----------|------|
+| Add, subtract, compare, logic, shift, `SET`, `GET`, `PUT`, `SYNC`, `SWYM`, wyde ops, conditional set, relative jump | 1υ |
+| Correctly predicted branch | 1υ |
+| Mispredicted branch, `POP`, `GO` | 3υ |
+| Integer multiply | 10υ |
+| Integer divide | 60υ |
+| `TRAP`, `TRIP`, `RESUME` | 5υ |
+| Most floating-point ops | 4υ; `FCMP`/`FEQL`/`FUN` are 1υ; `FDIV`/`FSQRT` are 40υ |
+| Load or store | μ + υ, except the holes `#x98`–`#x9F` and `#xB8`–`#xBF` |
+| `CSWAP` | 2μ + 2υ |
+| `SAVE`, `UNSAVE` | 20μ + υ |
 
-| Instruction | This VM | MMIX-SIM |
-| --- | --- | --- |
-| `TRAP 0,0,0` | Halt | Halt |
-| `TRAP 0,1,Z` | Putchar: low 8 bits of `$Z` | `Fopen` |
-| anything else | Append a note and halt | The corresponding call, or an error |
+Prediction in that table: ordinary branches predict not taken, probable branches (`PB*`) predict taken. `vm-cycles` and `vm-mems` do not match this table. Plan 08 adds the counters on the functional interpreter. Plan 11 replaces them, when a pipeline is enabled, with cycle counts from the pipe.
 
-`demo-putchar-hello` and the test `e2e-hello` depend on the putchar convention. It cannot coexist with `Fopen` = 1. A practice VM should implement the simulator calls and retire putchar (or hide it behind an explicit non-default flag).
+MMMIX’s pipeline has stages F, D, X, M, W, with X split into XF (add), XM (multiply), and XD (divide). A configuration file sets functional-unit latencies and up to five caches (instruction, data, secondary, and two translation caches): associativity, block size, write-back, write-allocate, access time, ports, replacement. `mmmix` simulates one processor. Plan 11 is that one processor. It does not grow a second core; plan 12 does.
 
-Also missing: `TRIP`, `RESUME`, trip vectors, `rA` enable bits, `rT`/`rTT`/`rK`/`rQ`. For the practice target, emulate syscalls directly the way `mmix` does. Full trip/trap delivery is P2 unless you are teaching the exception chapter itself (then a minimal `TRIP` + `RESUME` is P1).
+## Several processors (§31, plan 12)
 
-### 7. Calling convention / register stack — missing
+The architecture’s multiprocessor rules are `CSWAP` and `SYNC`. There is no specified core-count register, no specified inter-processor interrupt opcode, and no specified cache-coherence protocol. MMMIX states that multiprocessing is outside that simulator.
 
-This is the feature that separates a toy ISA from programs in the books. `mmix-doc` §29, abbreviated:
+The full machine in this repository is still a multiprocessor, with these implementation choices written down in plan 12 so two cores have one meaning:
 
-- `PUSHJ $X,RA` / `PUSHGO $X,$Y,$Z`: if `X` is marginal, widen `rL` first. Push `$0`…`$X` (the last of these is the count `X` itself, the “hole”) onto the register stack, rename `$(X+1)`… to `$0`…, set `rL ← rL−X−1`, set `rJ ← λ+4`, and branch (forward/backward wyde, or absolute for `PUSHGO`).
-- `POP X,YZ` undoes the matching push, plants the return values around the hole (the last return value drops into the hole; the others keep their order), and jumps to `rJ + 4*YZ`.
-- A subroutine that calls further routines must `GET` `rJ` to a local and `PUT` it back before `POP`.
-- `SAVE`/`UNSAVE` snapshot locals, globals, and a defined set of specials. The official loader starts a process with `UNSAVE` (`mmix-sim`). A user-mode loader may apply that postamble directly instead of executing BIOS.
+- Each core has its own general registers, special registers, `PC`, and (once plan 11 exists) pipeline.
+- Physical memory is shared. Virtual memory is per core, because each core has its own `rV`.
+- `CSWAP` locks the target octa for the duration of the compare and the possible store.
+- `SYNC` XYZ = 0…3 is a fence on that core’s accesses to the shared memory. XYZ = 5…7 also maintain that core’s caches. A fence does not stall another core except through the shared-memory order the fence creates.
+- One implementation-defined machine bit in `rQ` is the inter-processor interrupt. A core raises another core’s bit through a memory-mapped register at a physical address `≥ 2^48`. Device bits in the I/O fields of `rQ` stay available for a later device model.
+- The functional scheduler runs cores by taking one retired instruction from each runnable core in turn. Lockstep pipelines are not required.
 
-`GREG` in MMIXAL allocates globals from 254 downward and sets `rG`. `$255` stays global; it is the syscall argument/result register. None of `PUSHJ`, `POP`, `PUSHGO`, `SAVE`, `UNSAVE`, `GET`, or `PUT` is in `+op+`.
+## Software around the machine
 
-An internal Lisp stack is an acceptable first implementation of `S[τ]`, as long as `PUSHJ`/`POP`/`rL`/`rG` match the spec. Spilling through `rO`/`rS` into `Stack_Segment` can follow once segmented memory exists. `SAVE`/`UNSAVE` matter for the loader and for coroutines; they are not needed to run a first `PUSHJ` example.
+### MMIXAL (plan 09)
 
-### 8. Assembler / loader — partial
+Students type `.mms`: `LOC`, `IS`, `GREG`, `PREFIX`, `LOCAL`, `BYTE`/`WYDE`/`TETRA`/`OCTA`, strings, expressions, and local labels `1H`/`1B`/`1F` through `9H`. `GREG` allocates globals from 254 downward and the object file’s postamble sets `rG`. `BSPEC`…`ESPEC` brackets special tetras the loader may skip.
 
-What students type is MMIXAL, not s-expressions: `LOC`, `GREG`, `IS`, `BYTE`/`WYDE`/`TETRA`/`OCTA`, local labels `1H`/`1B`/`1F`, expressions, `PREFIX`, and `Main`. `mmixal` writes a `.mmo` object file (the format specified with the assembler in MMIXware). The simulator loads `.mmo`, relocates segments, applies the `GREG`/stack postamble, and starts at `Main`.
+`src/asm.lisp` assembles s-expressions into the same opcode bytes `mmixal` emits. It has no expression language, no local labels, and no `GREG`. `src/mmo.lisp` loads `mmixal` output: quote, loc, skip, fixups, file, line, spec (skipped), post, stab, end. That split is enough to run a book program that was assembled elsewhere. A full tree also accepts `.mms` directly.
 
-What we have (`src/asm.lisp`):
+### MMIX-SIM session (plan 10)
 
-- Forms `(program (:org addr) (label :name) (setl $1 10) …)`.
-- Registers as `$3` or `3`. Labels as branch/`JMP`/`GETA` targets.
-- `:byte` and `:word` (the latter is an octa, despite the name). No wyde or tetra directives.
-- A second `:org` updates label addresses but `assemble-into` writes the byte vector as one contiguous image at the first origin. A gap or a data segment is not placed at the address `collect-labels` recorded.
-- No `GREG`, no expressions, no local labels, no `.mmo` reader, no symbol table retained on the VM (`assemble` returns a label hash only to the caller).
+Still different from `mmix prog.mmo args…` and from the `mmix>` prompt:
 
-**Practical format for TAOCP practice:** keep writing small tests in s-expressions, but treat **`.mmo` from external `mmixal`** as the program format. Reimplementing MMIXAL inside Lisp is a large project (expressions, local labels, `GREG`, fixups) that duplicates a tool Knuth already ships. A loader is smaller and unlocks the printed programs unchanged. The s-expression assembler should still be fixed to emit real opcodes, so tests and `.mmo` programs agree.
+- **Startup image.** `$0` is `argc`. `$1` points at the first argument pointer. The program name is argument 0. Strings and pointers live in `Pool_Segment`. `M[Pool_Segment]` is the first free pool octa. `rL` starts at 2. MMIX-SIM builds this by fabricating a stack and executing `UNSAVE`. `load-mmo` sets `PC` to `Main` and does not build that image.
+- **Text files.** Modes 0 and 1 are C text streams (`"r"` / `"w"`). Newline inside the guest is the byte `#x0A` (wyde `#x000A`). Host text translation happens at the stream boundary. Modes 2–4 are binary. This tree opens every file as `(unsigned-byte 8)` and does not translate.
+- **Interactive commands.** Step (empty line), `c`, `q`, `s`, dump and assign with `!` `.` `#` `"`, `+`, `@`, trace `t`/`u`, breakpoints `b[rwx]`, segment `T`/`D`/`P`/`S`, `B`, `i`, `h`. The Lisp API has `step-vm`, `continue-vm`, three breakpoint kinds, and hex dumps. It has no command reader, no floating or string dump, and no tracepoint separate from a breakpoint.
+- **Profile and the statistics line.** MMIX-SIM can count executions per instruction and print mems and oops. `vm-lines` holds file and line from `lop_line`. Nothing increments a profile, and the exit report is `vm-cycles` plus `vm-mems`.
 
-### 9. Debugging / learner UX — partial
+`SWYM` is specified as a no-op whose XYZ fields may signal a debugger. The functional interpreter correctly retires it as a no-op. A debugger hook on `SWYM` belongs to plan 10, not to a change in the opcode’s register effect.
 
-`mmix -i` (documented in `mmix-sim`) is the session students copy: single step, continue, breakpoints on read/write/execute, dump local vs global registers and specials, dump memory in decimal/hex/float/string, jump to an address, switch the current segment (`T`/`D`/`P`/`S`).
+## What the plans deliberately leave alone
 
-We have `step-vm`, `run-vm`, `disassemble-at`, `dump-registers`, `dump-memory`. Gaps that matter once programs are longer than the demos:
-
-- No breakpoints, so `run-vm` is all-or-nothing aside from `:max-cycles`.
-- `dump-registers` skips specials, `rL`/`rG`, and the local/marginal/global distinction.
-- `disassemble-at` prints our mnemonic for the opcode byte, which will misname `#41` as `BNZ` until the map is fixed.
-- Labels from `assemble` are not stored on the VM, so a dump cannot show symbols.
-- No memory-reference count next to the instruction count.
-
-Step and dump are the right foundation. Breakpoints and a special-register view are the next UX work, after the ISA can run a real subroutine.
-
-### 10. Compatibility target — recommendation
-
-Three targets, and only one is realistic for this codebase:
-
-| Target | What it means | Verdict |
-| --- | --- | --- |
-| Run MMIXware binaries / NNIX | `.mmo` plus BIOS at `#8000000000000000`, `rV` page tables, privileged `TRAP` delivery, dynamic traps, `SAVE`/`UNSAVE` process switch, pipeline | **Not the goal.** Years of OS surface for no gain on exercise answers |
-| Run educational programs assembled in-repo | Today’s s-expressions only | **Too small.** Readers would translate every listing by hand, including `PUSHJ` and `LOC Data_Segment` |
-| Run MMIXAL via the external toolchain | `mmixal foo.mms` → `foo.mmo` → this VM, user mode, integer ISA, register stack, four segments, MMIX-SIM I/O | **Yes.** This is what Fascicle 1 and the MMIX supplement assume, minus the official `mmix` simulator |
-
-The third target still allows pure-Lisp experiments: the s-expression assembler stays, and it must target the same ISA. Shipping a private dialect (current branch opcodes, putchar trap, flat `$0` as a base register) will teach habits that fail as soon as a student opens a `.mms` file.
-
-## Gaps by priority
-
-### P0 — must-have for TAOCP practice
-
-Without these, a reader cannot type a program from the book and check it.
-
-1. **Spec-correct control transfers.** Forward/backward branch opcodes `#40`–`#5F` per the chart; unsigned displacements; `JMP`/`JMPB`; `GETA`/`GETAB`. `GO`/`GOI` set only `$X`, ignore the low two target bits, and do not write `rJ`. Update `disassemble-at` to match.
-2. **Register window and subroutine linkage.** `rL`/`rG` with marginal-read and auto-widen rules (`G ≥ 32`, initial `rG` from the program, default 255). `PUSHJ`/`PUSHJB`/`PUSHGO`/`PUSHGOI` and `POP`. `rJ` saved and restored the way §29 describes. A Lisp-side register stack is acceptable until spill exists.
-3. **`GET`/`PUT`.** At least the user-visible specials programs actually touch: `rA rB rD rE rG rH rJ rL rM rR rP`, readable and writable under the §43 restrictions (`rN`/`rO`/`rS` not writable; `PUT rL` only decreases). Until this exists, `DIV`’s remainder is invisible to MMIX code.
-4. **Integer ISA that MMIXAL actually emits.**
-   - `ADDU`/`SUBU`/`NEG`/`NEGU`/`2ADDU`/`4ADDU`/`8ADDU`/`16ADDU` and immediates (`LDA` = `ADDU`).
-   - Signed `DIV` (floor quotient, remainder sign of divisor, div0 and `−2^63/−1` cases, `rR`) and `DIVU` (`rD`). `MULU` writes `rH`.
-   - `SLU`. Shift counts ≥ 64 follow §14. Signed `ADD`/`SUB`/`MUL`/`SL` set the V event bit in `rA`; `DIV` by zero sets D. Enabling the trip can wait.
-   - Tetra `LDT`/`LDTU`/`STT`/`STTU` and the immediate forms of every load and store we claim to support (`LDBI`, `LDWI`, `LDTI`, `LDOI`, `STBI`, `STWI`, `STTI`, `STOI`, and the unsigned twins).
-   - Alignment by masking, as in §6.
-   - Conditional sets `CS*` and `ZS*` (`#60`–`#7F`). Fascicle 1 treats them as basic, and generated code uses them instead of branches.
-5. **Four segments.** Sparse or paged memory so `#0`, `#2000000000000000`, `#4000000000000000`, and `#6000000000000000` can all hold data. Text programs load at `#100`, leaving room for trip vectors. Out-of-range access should be a clean VM fault, not an uncaught Lisp error, once programs are expected to run.
-6. **MMIX-SIM `TRAP` subset, not putchar.** `Halt` (Y=0), `Fputs` (Y=7) and `Fgets` (Y=4) on `StdIn`/`StdOut`/`StdErr`, plus `Fopen`/`Fclose`/`Fread`/`Fwrite` so file-based exercises work. `$255` is the argument and the result, as in `mmix-sim`. Remove or strictly opt-in the current `TRAP 0,1,Z` putchar (it occupies `Fopen`).
-7. **A way to load book programs.** A `.mmo` loader (relocations, segment images, `rG` / entry point from the postamble). The s-expression assembler remains for tests but must emit the opcodes from item 1. Fix the multi-`:org` bug in `assemble-into` (bytes are packed contiguously, so a second origin is not honored).
-
-### P1 — important, not required to check the first integer exercises
-
-- **Floating point** to `mmix-doc` §21–28, including `rA` rounding and the event bits `WIOUZX`. Needed for the FP part of Fascicle 1 and for Volume 2. Short-float `LDSF`/`STSF` can trail the scalar operations.
-- **Bitwise ops used by real listings:** `ANDN` and the other Boolean completions, `BDIF`/`WDIF`/`TDIF`/`ODIF`, `MUX` (`rM`), `SADD`, and the `ANDNH`…`ANDNL` wydes. `MOR`/`MXOR` show up in later bit-fiddling programs.
-- **`LDHT`/`STHT`/`STCO`.** High-tetra arithmetic is a taught idiom (§7–8).
-- **Register-stack spill** via `rO`/`rS` into `Stack_Segment`, once deep recursion no longer fits in a Lisp vector.
-- **`SAVE`/`UNSAVE`**, if the loader should execute the official startup image instead of decoding it.
-- **Minimal trips:** `TRIP`, the eight arithmetic entry points, and `RESUME`, so exception exercises can be run. Default handlers can be `TRAP 1` behavior (report and stop) without a kernel.
-- **Learner session:** breakpoints, dump of specials and of local vs global, symbols from the object file, instruction count plus memory-reference count. `SWYM` as a no-op (the simulator uses it as a stopping point).
-- **Assembler comfort if `.mmo` is inconvenient on some machines:** a *subset* of MMIXAL (`LOC`, `GREG`, `IS`, data directives, local labels, integer expressions) is enough. Full macro MMIXAL is not.
-
-### P2 — nice-to-have / full MMIXware parity
-
-Not needed to practice TAOCP, and not part of the recommended target.
-
-- Virtual translation `rV`, page tables, protection bits, negative kernel addresses, MMIO above `2^48`.
-- Dynamic traps, `rK`/`rQ`, privileged `PUT`, trap entry at `rT` with a real BIOS (`#8000000000000000` in the extended examples).
-- Cycle-accurate υ/μ, branch prediction, caches, the MMMIX pipeline.
-- `CSWAP`, `LDVTS`, `LDUNC`/`STUNC`, `PRELD`/`PREGO`/`PREST`, `SYNCD`/`SYNCID`, `SYNC` beyond “nop on one CPU.”
-- `Fgetws`/`Fputws`, `Fseek`/`Ftell`, argv setup in `Pool_Segment`, the full interactive command language of `mmix -i`.
-- Object-file symbol types, line numbers, and profile counts.
-- Hardware register-ring details (the 512-deep local ring in §42). Observable behavior of `PUSH`/`POP` is what matters; the ring is an implementation technique.
-
-## Suggested implementation order
-
-Each phase should leave the existing demos runnable (update them when the `TRAP` convention changes) and should add tests that compare against the spec, not only against the previous assembler.
-
-1. **Phase A — stop disagreeing with the opcode chart.** Re-encode branches, `JMP`/`JMPB`, `GETA`/`GETAB`. Fix `GO`. Fix shifts, signed `DIV`/`rR`, and `rA` event bits for V and D. Add `ADDU`/`SUBU`/`NEG*`/`SLU`/`nADDU`, tetra and immediate memory ops, alignment masking, and `CS*`/`ZS*`. Still a flat register file and the s-expression assembler. This phase is pure Lisp and unblocks honest tests.
-2. **Phase B — subroutines.** `rL`/`rG`, `PUSHJ`/`POP`/`PUSHGO`, `GET`/`PUT`, `rJ` discipline. Port a two-page Fascicle 1 subroutine (call, nested call that saves `rJ`, `POP` with a result) as the acceptance test.
-3. **Phase C — book programs load and print.** Segmented memory. `.mmo` loader and `rG` initialization. Replace putchar with `Halt` + `Fputs`/`Fgets`/`Fopen`/`Fread`/`Fwrite`. Acceptance test: the standard hello world (`LOC Data_Segment`, `GREG`, `LDA $255`, `TRAP 0,Fputs,StdOut`, `TRAP 0,Halt,0`) and one subroutine-heavy program from Fascicle 1 or the MMIX supplement.
-4. **Phase D — practice session.** Breakpoints, special-register and segment dumps, symbol names, mems alongside instructions. Optional `SWYM` nop.
-5. **Phase E — floating point.** Binary64 operations and `rA` rounding, with tests for the signed-zero and NaN rules in §22. This is when Volume 2 exercises become possible.
-6. **Phase F — only if a later goal says so.** Trips and `RESUME`, `SAVE`/`UNSAVE` spill, then anything in the P2 list. Do not start here.
-
-## Open questions
-
-1. **Confirm the target.** External `mmixal` + `.mmo` loader, as recommended, or must the project stay free of any non-Lisp tool and therefore grow an MMIXAL subset?
-2. **Putchar compatibility.** Drop `TRAP 0,1,Z` putchar (breaks `demo-putchar-hello` and `e2e-hello`) in favor of `Fputs`, or keep putchar only when a VM flag is set?
-3. **When is floating point in scope?** Deferred to Phase E (recommended), or required in the first “practice-ready” milestone because Fascicle 1 documents it up front?
-4. **Timing.** Agree that instruction count plus an optional memory-reference count is enough, and that υ/μ pipeline costs stay a manual exercise?
-5. **Loader startup.** Interpret the `.mmo` postamble into `rG`, memory, and PC directly, or emulate the official `UNSAVE` prelude? The first is less code; the second is easier to compare against `mmix -i` traces.
-6. **How big are the segments?** A few megabytes each, grow-on-touch pages, or a single sparse map with a hard cap?
-7. **`rG` default for s-expression programs** that do not mention globals: 255 (everything local until used) is the usual stand-alone default. Confirm before Phase B changes today’s flat file.
+- The opcode map, the integer results, the register window, and the `.mmo` XOR loader. Those match the chart and stay.
+- Version-1.0.0 page-table layout. Later proposals that replace `b1`…`b4` are not adopted.
+- A second, incompatible putchar `TRAP`. `Y = 1` remains `Fopen`. `:legacy-putchar` stays opt-in.
+- Building a multi-user operating system. The kernel ROM in plan 05 is the MMIX-SIM service set plus the trap entry the architecture requires.

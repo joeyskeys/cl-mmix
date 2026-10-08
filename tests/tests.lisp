@@ -493,11 +493,11 @@
                (reset-vm vm :clear-registers t)
                (list (plusp rn)
                      (= (ldb (byte 24 40) rn) cl-mmix::+arch-version+)
-                     (let ((unix (logand rn #xffffffffff)))
-                       (and (>= now unix) (<= (- now unix) 5)))
-                     (= rn after-put)
+                   (let ((unix (logand rn #xffffffffff)))
+                     (and (>= now unix) (<= (- now unix) 5)))
+                   (= rn after-put)
                      (= rn after-reset)
-                     (= rn (special-reg vm cl-mmix::+r-n+)))))))
+                     (= rn (special-reg vm cl-mmix::+r-n+))))))
          (list t t t t t t))
 
   (check interval-ri
@@ -525,7 +525,7 @@
                      (logbitp 6 (reg vm 4))
                      (logbitp 6 (reg vm 6))
                      (special-reg vm cl-mmix::+r-q+)
-                     (special-reg vm cl-mmix::+r-i+))))))
+                     (special-reg vm cl-mmix::+r-i+)))))
          (list (list 1 nil) (list 0 t) t t #x40 0))
 
   (check breakpoint-does-not-retire
@@ -596,7 +596,7 @@
                    (and (search "rU=#x" shown) t)
                    (and (search "rN=#x" quiet) t)
                    (search "rI=" quiet)
-                   (search "rU=" quiet)))))
+                   (search "rU=" quiet))))
          (list t t t t nil nil))
 
   (check kernel-fault

@@ -2,7 +2,7 @@
 
 A user-mode **MMIX** virtual machine in portable Common Lisp (tested on SBCL).
 
-It runs educational MMIXAL: the integer and floating-point instruction sets, the register stack, the four address segments, MMIX-SIM traps, and `.mmo` object files. It is not an MMIXware replacement: there is no pipeline. Page tables run when `make-vm` is called with `:kernel t` and `:virtual-memory t`. The default VM still uses a flat map of the four segments.
+It runs educational MMIXAL: the integer and floating-point instruction sets, the register stack, the four address segments, MMIX-SIM traps, and `.mmo` object files. It is not an MMIXware replacement: there is no pipeline. Page tables run when `make-vm` is called with `:kernel t` and `:virtual-memory t`. The default VM still uses a flat map of the four segments, and stores go straight to memory. `:caches t` adds write-back instruction and data caches.
 
 What the code actually does, opcode by opcode, is written in [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md). The distance from that code to a full MMIX machine is [docs/TAOCP-GAP-ANALYSIS.md](docs/TAOCP-GAP-ANALYSIS.md), and the sequence of plans is [docs/plans/00-roadmap.md](docs/plans/00-roadmap.md).
 
@@ -157,13 +157,14 @@ Each `:org` is its own segment. `PC` becomes the first origin, so put code befor
 (disassemble-at vm)
 ```
 
-`run-vm` signals a Lisp error when `:max-cycles` is exhausted without a halt or a breakpoint. A `mmix-fault` (kernel address, page budget, unimplemented opcode) is caught by `step-vm`: `vm-fault` holds the reason and the machine halts.
+`run-vm` signals a Lisp error when `:max-cycles` is exhausted without a halt, a breakpoint, or `SYNC` 4. A `mmix-fault` (kernel address, page budget, unimplemented opcode) is caught by `step-vm`: `vm-fault` holds the reason and the machine halts.
 
 ## API
 
 | Function | Role |
 |----------|------|
-| `make-vm` | `:memory-size` page budget, `:pc`, `:input`, `:legacy-putchar`, `:kernel`, `:virtual-memory` |
+| `make-vm` | `:memory-size` page budget, `:pc`, `:input`, `:legacy-putchar`, `:kernel`, `:virtual-memory`, `:caches`, `:cache-config` |
+| `wake-core` | Leave the sleep entered by `SYNC` 4 |
 | `assemble` / `assemble-into` / `load-program` / `load-mmo` | Build and load |
 | `step-vm` / `run-vm` / `continue-vm` | Execute |
 | `reg` / `set-reg` / `special-reg` / `set-special` | Register window and raw specials |
@@ -184,7 +185,7 @@ sbcl --script tests/run-tests.lisp
 
 - No pipeline, and no `υ`/`μ` counts beyond a simple `mems` counter. Dynamic traps and `RESUME 1` run when `make-vm` is called with `:kernel t`. Page tables run with `:virtual-memory t` as well. The default VM still has neither, and bit 63 of an address still faults there. `LDVTS` returns 0 on that default VM.
 - `RESUME 1` (`Z ≠ 0`) on the default VM is still the unimplemented path. `RESUME 0` inserts ropcodes 0–2.
-- `SWYM` does not halt. `PRE*`/`SYNCD`/`SYNCID` are no-ops. `LDUNC`/`STUNC` are ordinary octa accesses. `SYNC` 6 drops the translation caches when virtual memory is on; the memory fence itself is still a no-op.
+- `SWYM` does not halt. With caches off, `PRE*`/`SYNCD`/`SYNCID` change nothing and `LDUNC`/`STUNC` are ordinary octa accesses. `:caches t` writebacks dirty lines and records `SYNC` 0–3 as a fence tag. Hit and miss delays are still absent. `SYNC` 6 drops the translation caches when virtual memory is on.
 - `Fopen` text and binary modes are not newline-translated.
 
 ## License

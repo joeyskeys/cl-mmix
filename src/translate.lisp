@@ -175,21 +175,34 @@ Physical 0 is a successful translation: the second value distinguishes it."
         (finish-trans vm va trans perm s)))))
 
 (defun fetch-tetra (vm addr)
-  "The instruction tetra at ADDR. Virtual memory asks for execute permission."
+  "The instruction tetra at ADDR. Virtual memory asks for execute permission.
+With caches on, a hit comes from the instruction cache."
   (if (vm-virtual-memory vm)
-      (physical-ref vm (translate vm addr :exec) 4)
-      (mem-ref-u32 vm addr :internal t)))
+      (multiple-value-bind (phys ok) (translate vm addr :exec)
+        (cond ((not ok) 0)
+              ((vm-caches vm)
+               (cache-read-physical (vm-icache vm) vm phys 4))
+              (t (physical-ref vm phys 4))))
+      (if (vm-caches vm)
+          (multiple-value-bind (phys ok) (resolve-identity-address vm addr)
+            (if ok
+                (cache-read-physical (vm-icache vm) vm phys 4)
+                0))
+          (mem-ref-u32 vm addr :internal t))))
 
 (defun guest-load (vm addr nbytes)
   (multiple-value-bind (phys ok) (translate vm addr :read)
-    (if ok
-        (physical-ref vm phys nbytes)
-        0)))
+    (cond ((not ok) 0)
+          ((vm-caches vm)
+           (cache-read-physical (vm-dcache vm) vm phys nbytes))
+          (t (physical-ref vm phys nbytes)))))
 
 (defun guest-store (vm addr nbytes value)
   (multiple-value-bind (phys ok) (translate vm addr :write)
     (when ok
-      (physical-set vm phys nbytes value))
+      (if (vm-caches vm)
+          (cache-write-physical (vm-dcache vm) vm phys nbytes value)
+          (physical-set vm phys nbytes value)))
     value))
 
 (defun probe-translation (vm va)

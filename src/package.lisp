@@ -36,6 +36,7 @@
    #:run-vm
    #:continue-vm
    #:reset-vm
+   #:wake-core
    #:breakpoint
    #:clear-breakpoints
    ;; Assembler / loader

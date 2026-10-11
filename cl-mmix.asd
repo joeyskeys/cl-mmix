@@ -3,7 +3,7 @@
   :description "User-mode MMIX virtual machine for educational MMIXAL programs"
   :author "cl-mmix"
   :license "GPL-3.0"
-  :version "0.11.0"
+  :version "0.12.0"
   :depends-on ()
   :serial t
   :components ((:module "src"
@@ -11,6 +11,7 @@
                 (                 (:file "package")
                  (:file "util")
                  (:file "machine")
+                 (:file "cache")
                  (:file "decode")
                  ;; Later plans add a sibling directory here instead of growing ops.lisp.
                  (:module "float"

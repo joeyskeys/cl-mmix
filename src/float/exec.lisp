@@ -112,6 +112,7 @@ register or the stored tetra has already been written."
   (set-reg vm (inst-x inst)
            (let ((*fp-exceptions* 0))
              (load-sf (mem-ref-u32 vm (aligned-addr vm inst 2)))))
+  (clear-vm-fence vm)
   nil)
 
 (defun exec-stsf (vm inst)
@@ -122,4 +123,5 @@ register or the stored tetra has already been written."
          (value (reg vm (inst-x inst)))
          (tetra (store-sf value)))
     (mem-set-u32 vm (logand addr (lognot 3)) tetra)
+    (clear-vm-fence vm)
     (commit-fp-exceptions vm *fp-exceptions* (inst-raw inst) addr value)))

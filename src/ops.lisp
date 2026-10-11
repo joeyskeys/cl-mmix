@@ -201,18 +201,22 @@
   nil)
 
 (defun read-int (vm addr bytes)
-  (ecase bytes
-    (1 (mem-ref-u8 vm addr))
-    (2 (mem-ref-u16 vm addr))
-    (4 (mem-ref-u32 vm addr))
-    (8 (mem-ref-u64 vm addr))))
+  (prog1
+      (ecase bytes
+        (1 (mem-ref-u8 vm addr))
+        (2 (mem-ref-u16 vm addr))
+        (4 (mem-ref-u32 vm addr))
+        (8 (mem-ref-u64 vm addr)))
+    (clear-vm-fence vm)))
 
 (defun write-int (vm addr bytes value)
-  (ecase bytes
-    (1 (mem-set-u8 vm addr value))
-    (2 (mem-set-u16 vm addr value))
-    (4 (mem-set-u32 vm addr value))
-    (8 (mem-set-u64 vm addr value))))
+  (prog1
+      (ecase bytes
+        (1 (mem-set-u8 vm addr value))
+        (2 (mem-set-u16 vm addr value))
+        (4 (mem-set-u32 vm addr value))
+        (8 (mem-set-u64 vm addr value)))
+    (clear-vm-fence vm)))
 
 (defun sign-extend-width (raw bytes)
   (let ((bits (* 8 bytes)))
@@ -264,6 +268,7 @@
     (when (and (vm-virtual-memory vm)
                (not (nth-value 1 (translate vm addr :cswap))))
       (incf (vm-mems vm))
+      (clear-vm-fence vm)
       (set-reg vm (inst-x inst) 0)
       (return-from exec-cswap nil)))
   (incf (vm-mems vm))
@@ -277,7 +282,49 @@
         (progn
           (set-special vm +r-p+ mem)
           (set-reg vm (inst-x inst) 0))))
+  (clear-vm-fence vm)
   nil)
+
+(defun exec-ldunc (vm inst)
+  "Read memory and do not allocate a cache line."
+  (set-reg vm (inst-x inst) (backing-load vm (aligned-addr vm inst 3) 8))
+  (clear-vm-fence vm)
+  (incf (vm-mems vm))
+  nil)
+
+(defun exec-stunc (vm inst)
+  "Write memory and drop the matching data-cache line."
+  (backing-store vm (aligned-addr vm inst 3) 8 (reg vm (inst-x inst)))
+  (clear-vm-fence vm)
+  (incf (vm-mems vm))
+  nil)
+
+(defun span-count (inst)
+  (1+ (inst-x inst)))
+
+(defun exec-prefetch (vm inst which)
+  (when (vm-caches vm)
+    (cache-prefetch vm which (eff-addr vm inst) (span-count inst)))
+  (clear-vm-fence vm)
+  nil)
+
+(defun exec-syncd (vm inst)
+  (when (vm-caches vm)
+    (cache-syncd vm (eff-addr vm inst) (span-count inst)))
+  (clear-vm-fence vm)
+  nil)
+
+(defun exec-syncid (vm inst)
+  (when (vm-caches vm)
+    (cache-syncid vm (eff-addr vm inst) (span-count inst)))
+  (clear-vm-fence vm)
+  nil)
+
+(defun sync-k-enabled-p (vm)
+  "XYZ ≥ 4 is privileged while rK's k bit is set at a nonnegative PC."
+  (and (vm-kernel vm)
+       (logtest (special-reg vm +r-k+) +rq-k+)
+       (not (logbitp 63 (vm-pc vm)))))
 
 (defun exec-mem (vm inst)
   (let ((op (logand (inst-op inst) #xFE)))
@@ -288,12 +335,16 @@
       (#x86 (exec-load vm inst 2 nil))
       (#x88 (exec-load vm inst 4 t))
       (#x8A (exec-load vm inst 4 nil))
-      ((#x8C #x8E #x96) (exec-load vm inst 8 nil))
+      ((#x8C #x8E) (exec-load vm inst 8 nil))
+      (#x96 (if (vm-caches vm)
+                (exec-ldunc vm inst)
+                (exec-load vm inst 8 nil)))
       (#x90 (exec-ldsf vm inst))
       (#x92 (progn
               (incf (vm-mems vm))
               (set-reg vm (inst-x inst)
                        (ash (mem-ref-u32 vm (aligned-addr vm inst 2)) 32))
+              (clear-vm-fence vm)
               nil))
       (#x94 (exec-cswap vm inst))
       (#x98 (progn
@@ -304,7 +355,8 @@
                     (t
                      (set-reg vm (inst-x inst) (ldvts vm (eff-addr vm inst)))))
               nil))
-      ((#x9A #x9C) nil)
+      (#x9A (exec-prefetch vm inst :data))
+      (#x9C (exec-prefetch vm inst :inst))
       (#x9E (exec-go vm inst))
       (#xA0 (exec-store vm inst 1 t))
       (#xA2 (exec-store vm inst 1 nil))
@@ -312,18 +364,25 @@
       (#xA6 (exec-store vm inst 2 nil))
       (#xA8 (exec-store vm inst 4 t))
       (#xAA (exec-store vm inst 4 nil))
-      ((#xAC #xAE #xB6) (exec-store vm inst 8 nil))
+      ((#xAC #xAE) (exec-store vm inst 8 nil))
+      (#xB6 (if (vm-caches vm)
+                (exec-stunc vm inst)
+                (exec-store vm inst 8 nil)))
       (#xB0 (exec-stsf vm inst))
       (#xB2 (progn
               (incf (vm-mems vm))
               (mem-set-u32 vm (aligned-addr vm inst 2)
                            (ldb (byte 32 32) (reg vm (inst-x inst))))
+              (clear-vm-fence vm)
               nil))
       (#xB4 (progn
               (incf (vm-mems vm))
               (mem-set-u64 vm (aligned-addr vm inst 3) (inst-x inst))
+              (clear-vm-fence vm)
               nil))
-      ((#xB8 #xBA #xBC) nil)
+      (#xB8 (exec-syncd vm inst))
+      (#xBA (exec-prefetch vm inst :data))
+      (#xBC (exec-syncid vm inst))
       (#xBE (exec-pushgo vm inst))
       (t (unimplemented (symbol-name (op-name (inst-op inst))))))))
 
@@ -536,14 +595,21 @@ a ropcode above 3, and ropcode 3 on RESUME 0 are illegal."
        nil)
       ((= op #xFC)
        (let ((xyz (inst-xyz inst)))
-         ;; XYZ ≥ 4 is privileged from a nonnegative PC. A kernel instruction
-         ;; may execute it. XYZ = 6 drops both translation caches.
-         (when (and (vm-kernel vm)
-                    (>= xyz 4)
-                    (not (logbitp 63 (vm-pc vm))))
-           (error 'mmix-suppress :bit +rq-k+))
-         (when (= xyz 6)
-           (drop-translation-caches vm)))
+         (cond
+           ((and (>= xyz 4) (sync-k-enabled-p vm))
+            (error 'mmix-suppress :bit +rq-k+))
+           ((> xyz 7)
+            (illegal-instruction))
+           ((<= xyz 3)
+            (record-vm-fence vm xyz))
+           ((= xyz 4)
+            (setf (vm-asleep vm) t))
+           ((= xyz 5)
+            (cache-writeback-all vm))
+           ((= xyz 6)
+            (drop-translation-caches vm))
+           ((= xyz 7)
+            (cache-discard-all vm))))
        nil)
       ((= op #xFD)
        (if (host-swym-p vm inst)
@@ -567,9 +633,15 @@ a ropcode above 3, and ropcode 3 on RESUME 0 are illegal."
 
 (defun step-vm (vm)
   "Fetch–decode–execute one instruction. An execute breakpoint stops first.
-Calling STEP-VM again while stopped executes that instruction."
+Calling STEP-VM again while stopped executes that instruction.
+SYNC 4 puts the core to sleep: further steps return until WAKE-CORE or a
+bit appears in rQ."
   (when (vm-halted vm)
     (return-from step-vm vm))
+  (when (vm-asleep vm)
+    (if (zerop (special-reg vm +r-q+))
+        (return-from step-vm vm)
+        (setf (vm-asleep vm) nil)))
   (let ((skip (or (vm-break-skip vm) (not (null (vm-break vm))))))
     (setf (vm-break vm) nil
           (vm-break-skip vm) nil)
@@ -619,10 +691,11 @@ Calling STEP-VM again while stopped executes that instruction."
   vm)
 
 (defun run-vm (vm &key (max-cycles 100000))
-  "Run until halt, breakpoint, or MAX-CYCLES.
-Signals an error if the cycle limit is hit without halt or a breakpoint."
+  "Run until halt, breakpoint, power-save, or MAX-CYCLES.
+Signals an error if the cycle limit is hit without halt, a breakpoint,
+or SYNC 4."
   (loop
-    (when (or (vm-halted vm) (vm-break vm))
+    (when (or (vm-halted vm) (vm-break vm) (vm-asleep vm))
       (return vm))
     (when (>= (vm-cycles vm) max-cycles)
       (error "VM exceeded max-cycles (~D) at PC=#x~X" max-cycles (vm-pc vm)))

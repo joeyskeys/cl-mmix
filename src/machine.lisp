@@ -168,7 +168,14 @@
   (mmio nil)
   (itc (make-hash-table :test 'eql) :type hash-table)
   (dtc (make-hash-table :test 'eql) :type hash-table)
-  (stack-alert nil :type boolean))
+  (stack-alert nil :type boolean)
+  (caches nil :type boolean)
+  (cache-config nil)
+  (dcache nil)
+  (icache nil)
+  (scache nil)
+  (fence nil)
+  (asleep nil :type boolean))
 
 ;;; Defined in src/translate.lisp. Guest loads and stores call them when
 ;;; virtual memory is on. A spill asks whether the stack page has pw.
@@ -176,18 +183,31 @@
          (ftype (function (t t (integer 1 8) t) t) guest-store)
          (ftype (function (t t) (values t t &optional)) stack-spill-target))
 
+;;; Defined in src/cache.lisp. Present only when :CACHES is set.
+(declaim (ftype (function (t t) t) install-caches)
+         (ftype (function (t) t) reset-line-caches)
+         (ftype (function (t t) (values (unsigned-byte 8) t &optional))
+                cache-note-load-byte)
+         (ftype (function (t t t) t) cache-note-store-byte)
+         (ftype (function (t t (integer 1 8)) (unsigned-byte 64)) cache-data-read)
+         (ftype (function (t t (integer 1 8) t) t) cache-data-write))
+
 ;;; Defined in src/kernel.lisp.
 (declaim (ftype (function (t) t) install-kernel))
 
 (defun make-vm (&key (memory-size #x2000000) (pc 0) input legacy-putchar kernel
-                   virtual-memory)
+                   virtual-memory caches cache-config)
   "Create an MMIX VM. Without :KERNEL this is the user-mode interpreter.
 MEMORY-SIZE is the grow-on-touch page budget in bytes (at least one page).
 General registers use the rL/rG window; rG starts at 255 and rL at 0.
 The register stack is rooted at Stack_Segment.
 :KERNEL installs the trap ROM, sets rT and rTT to its entry, and sets rK to all ones.
 :VIRTUAL-MEMORY requires :KERNEL and translates nonnegative addresses through rV.
-The default leaves the four segments as an identity map, and LDVTS returns 0."
+The default leaves the four segments as an identity map, and LDVTS returns 0.
+:CACHES installs a write-back instruction cache and data cache. :CACHE-CONFIG
+is a plist of associativity, blocksize, writeback, writeallocate, accesstime,
+sets, and secondary. The default VM keeps caches off, so loads and stores
+still reach memory in the same step."
   (unless (and (integerp memory-size) (plusp memory-size))
     (error "memory-size must be a positive integer"))
   (when (and virtual-memory (not kernel))
@@ -198,13 +218,17 @@ The default leaves the four segments as an identity map, and LDVTS returns 0."
              :input input
              :legacy-putchar (and legacy-putchar t)
              :kernel (and kernel t)
-             :virtual-memory (and virtual-memory t))))
+             :virtual-memory (and virtual-memory t)
+             :caches (and caches t)
+             :cache-config cache-config)))
     (set-special vm +r-g+ 255)
     (stamp-serial vm)
     (sync-stack vm)
     (init-files vm)
     (when kernel
       (install-kernel vm))
+    (when caches
+      (install-caches vm cache-config))
     vm))
 
 (defun init-files (vm)
@@ -228,7 +252,10 @@ The default leaves the four segments as an identity map, and LDVTS returns 0."
         (fill-pointer (vm-output vm)) 0
         (fill-pointer (vm-error-output vm)) 0
         (fill-pointer (vm-stack vm)) 0
-        (vm-stack-alert vm) nil)
+        (vm-stack-alert vm) nil
+        (vm-fence vm) nil
+        (vm-asleep vm) nil)
+  (reset-line-caches vm)
   (clrhash (vm-itc vm))
   (clrhash (vm-dtc vm))
   (when clear-registers
@@ -404,22 +431,52 @@ that retires; an instruction inserted by RESUME is part of that RESUME."
               do (%chunk-byte vm (+ addr i) (ldb (byte 8 shift) value))))
     value))
 
+(defun resolve-identity-address (vm addr)
+  "Hash address for an identity access. Return (values phys t).
+A nonnegative instruction that names a negative address sets n and returns
+NIL NIL: the load yields 0 and the store writes nothing. A kernel instruction
+at a negative PC clears bit 63. User mode faults on bit 63."
+  (setf addr (u64 addr))
+  (when (and (vm-kernel vm)
+             (logbitp 63 addr)
+             (not (logbitp 63 (vm-pc vm))))
+    (raise-program-bit vm +rq-n+)
+    (return-from resolve-identity-address (values nil nil)))
+  (if (and (vm-kernel vm) (logbitp 63 addr))
+      (values (logand addr #x7fffffffffffffff) t)
+      (values (user-addr addr) t)))
+
+(defun clear-vm-fence (vm)
+  "The next retired memory operation consumes the SYNC 0–3 tag."
+  (setf (vm-fence vm) nil))
+
+(defun record-vm-fence (vm xyz)
+  "XYZ 0…3 records :ALL, :STORE, :LOAD, or :MEMORY."
+  (setf (vm-fence vm)
+        (ecase xyz
+          (0 :all)
+          (1 :store)
+          (2 :load)
+          (3 :memory))))
+
+(defun wake-core (vm)
+  "Leave the power-save state entered by SYNC 4."
+  (setf (vm-asleep vm) nil)
+  vm)
+
 (defun %byte (vm addr &optional (value nil write-p))
-  (let ((addr (u64 addr)))
-    ;; A nonnegative instruction that names a negative address sets n.
-    ;; The load yields 0 and the store writes nothing. Kernel instructions
-    ;; (negative PC) map by clearing bit 63. User mode still faults.
-    (when (and (vm-kernel vm)
-               (logbitp 63 addr)
-               (not (logbitp 63 (vm-pc vm))))
-      (raise-program-bit vm +rq-n+)
+  (multiple-value-bind (addr ok) (resolve-identity-address vm addr)
+    (unless ok
       (return-from %byte 0))
-    (let ((addr (if (and (vm-kernel vm) (logbitp 63 addr))
-                    (logand addr #x7fffffffffffffff)
-                    (user-addr addr))))
-      (if write-p
-          (%chunk-byte vm addr value)
-          (%chunk-byte vm addr)))))
+    (cond (write-p
+           (%chunk-byte vm addr value)
+           (when (vm-caches vm)
+             (cache-note-store-byte vm addr value))
+           value)
+          ((vm-caches vm)
+           (multiple-value-bind (byte hit) (cache-note-load-byte vm addr)
+             (if hit byte (%chunk-byte vm addr))))
+          (t (%chunk-byte vm addr)))))
 
 (defun %guest-access (vm addr nbytes value write-p internal physical)
   (cond (physical
@@ -430,6 +487,10 @@ that retires; an instruction inserted by RESUME is part of that RESUME."
          (if write-p
              (guest-store vm addr nbytes value)
              (guest-load vm addr nbytes)))
+        ((and (vm-caches vm) (not internal))
+         (if write-p
+             (cache-data-write vm addr nbytes value)
+             (cache-data-read vm addr nbytes)))
         (write-p
          (if (= nbytes 1)
              (%byte vm addr value)

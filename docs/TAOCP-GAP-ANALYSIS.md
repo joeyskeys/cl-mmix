@@ -1,6 +1,6 @@
 # cl-mmix vs a full MMIX machine
 
-This document is the gap between the sources described in [IMPLEMENTATION.md](IMPLEMENTATION.md) (ASDF system `cl-mmix` 0.11.0) and a complete MMIX. It replaces the older write-up, which compared an early MVP (flat registers, about 64 opcodes, a private putchar `TRAP`) with a user-mode practice target. That user-mode target is what the tree implements now. The paragraphs below describe what is still missing after it.
+This document is the gap between the sources described in [IMPLEMENTATION.md](IMPLEMENTATION.md) (ASDF system `cl-mmix` 0.12.0) and a complete MMIX. It replaces the older write-up, which compared an early MVP (flat registers, about 64 opcodes, a private putchar `TRAP`) with a user-mode practice target. That user-mode target is what the tree implements now. The paragraphs below describe what is still missing after it.
 
 The work that closes each gap is a separate plan under [plans/](plans/00-roadmap.md).
 
@@ -18,7 +18,7 @@ Out of scope, and absent from the plans: proposals that change version 1.0.0 (a 
 
 ## Sources
 
-Current behavior: [IMPLEMENTATION.md](IMPLEMENTATION.md), then `src/machine.lisp`, `src/decode.lisp`, `src/ops.lisp`, `src/trap.lisp`, `src/kernel.lisp`, `src/translate.lisp`, `src/asm.lisp`, `src/mmo.lisp`, `src/api.lisp`, `tests/tests.lisp`.
+Current behavior: [IMPLEMENTATION.md](IMPLEMENTATION.md), then `src/machine.lisp`, `src/cache.lisp`, `src/decode.lisp`, `src/ops.lisp`, `src/trap.lisp`, `src/kernel.lisp`, `src/translate.lisp`, `src/asm.lisp`, `src/mmo.lisp`, `src/api.lisp`, `tests/tests.lisp`.
 
 Specification:
 
@@ -31,7 +31,7 @@ Where this file and the code disagree, the code wins for “implemented” and `
 
 ## Baseline already in the tree
 
-These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (121 checks) and must keep `make-vm` usable as a user-mode interpreter.
+These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (133 checks) and must keep `make-vm` usable as a user-mode interpreter.
 
 - All 256 opcode bytes are named in `src/decode.lisp`.
 - Integer arithmetic, shifts, compares, bitwise ops, wyde immediates, conditional sets, branches (including backward and probable forms), `JMP`/`GETA`/`GO`/`PUSHJ`/`PUSHGO`/`POP`, tetra and immediate loads and stores, `LDHT`/`STHT`/`STCO`/`CSWAP`/`MOR`/`MXOR`.
@@ -54,8 +54,8 @@ These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (
 | [03](plans/03-save-unsave.md) | `SAVE` / `UNSAVE` | Implemented. §43 image in one step; `POP` after `SAVE` faults | Interruptible spill once traps exist |
 | [04](plans/04-machine-specials.md) | `rC` `rF` `rI` `rN` `rU` | Implemented. `rN` frozen, `rI` sets `rQ` bit 6, `rU` counts retired opcodes, `rF` records a refused page. `rC` is consulted on a stack spill when virtual memory is on | Interval delivery through `rTT` is plan 05 |
 | [05](plans/05-kernel-traps.md) | Forced and dynamic traps | Implemented behind `:kernel`. Default `make-vm` still uses Lisp `exec-trap`, faults on bit 63, and ignores privileged `PUT` | `rT` / `rTT`, `rK`/`rQ`, `rwxnkbsp`, `RESUME 1`, kernel ROM for MMIX-SIM |
-| [06](plans/06-virtual-memory.md) | `rV` translation | Implemented behind `:virtual-memory` (requires `:kernel`). Default `make-vm` keeps the identity map and `LDVTS` returns 0 | Same walk; line caches and `SYNCD` are plan 07 |
-| [07](plans/07-cache-and-sync.md) | Caches and `SYNC` | `PRE*`/`SYNC*`/`LDUNC`/`STUNC` are nops or plain octas | §30–31 on one processor: caches, prefetch, ordering, privileged `SYNC` |
+| [06](plans/06-virtual-memory.md) | `rV` translation | Implemented behind `:virtual-memory` (requires `:kernel`). Default `make-vm` keeps the identity map and `LDVTS` returns 0 | Same walk; line caches landed in plan 07 |
+| [07](plans/07-cache-and-sync.md) | Caches and `SYNC` | Implemented behind `:caches`. Default `make-vm` still stores straight to memory. `SYNC` 0–3 records a fence tag | Same caches; hit and miss delays are plan 11 |
 | [08](plans/08-timing-costs.md) | μ and υ | One counter per instruction, one per load/store | §50 costs, including mispredicted branches |
 | [09](plans/09-mmixal.md) | MMIXAL | S-expressions only; `.mmo` loads | `.mms` in process: `LOC`, `GREG`, `IS`, local labels, expressions, `PREFIX` |
 | [10](plans/10-simulator-session.md) | MMIX-SIM session | Library API, raw file bytes, no argv | Text newlines, `argc`/`argv`, interactive commands, profile |
@@ -114,7 +114,7 @@ The program byte is `rwxnkbsp`: read, write, execute, negative address, kernel-p
 
 A security violation (`s`) occurs when an instruction at a nonnegative address runs while any `rwxnkbsp` bit of `rK` is clear. The operating system is the only code that runs with interrupts suppressed, because a `TRAP` clears `rK` and only `RESUME 1` (from a negative address) reloads it from `$255`.
 
-On the default VM, bit 63 of an address signals `mmix-fault` and halts, and `PUT` of a privileged register returns without writing (`privileged-special-p`). A kernel VM records program bits in `rQ` and traps through `rTT` when `rQ ∧ rK ≠ 0`. `x`, `k`, and `b` suppress the instruction. A load that raises `n` yields 0. A store that raises `n` writes nothing. `PUT` of `rN`, `rO`, or `rS` sets `b`. `PUT` of `rC rI rK rQ rT rU rV rTT` from a nonnegative PC sets `k` while `rK`’s `k` bit is set; the same `PUT` from a negative PC writes, and `PUT rQ` keeps any bit that came on since the last `GET rQ`. A nonnegative PC whose `rK` is missing any `rwxnkbsp` bit sets `s` in both `rQ` and `rK`. `p` is recorded for an instruction fetched from a negative address and cleared when `RESUME 1` returns to a nonnegative `rWW`. `SYNC` with XYZ ≥ 4 sets `k` from a nonnegative PC. XYZ = 6 drops both translation caches when virtual memory is on. The fence itself is plan 07.
+On the default VM, bit 63 of an address signals `mmix-fault` and halts, and `PUT` of a privileged register returns without writing (`privileged-special-p`). A kernel VM records program bits in `rQ` and traps through `rTT` when `rQ ∧ rK ≠ 0`. `x`, `k`, and `b` suppress the instruction. A load that raises `n` yields 0. A store that raises `n` writes nothing. `PUT` of `rN`, `rO`, or `rS` sets `b`. `PUT` of `rC rI rK rQ rT rU rV rTT` from a nonnegative PC sets `k` while `rK`’s `k` bit is set; the same `PUT` from a negative PC writes, and `PUT rQ` keeps any bit that came on since the last `GET rQ`. A nonnegative PC whose `rK` is missing any `rwxnkbsp` bit sets `s` in both `rQ` and `rK`. `p` is recorded for an instruction fetched from a negative address and cleared when `RESUME 1` returns to a nonnegative `rWW`. `SYNC` with XYZ ≥ 4 sets `k` from a nonnegative PC while `rK`'s `k` bit is set, and the cache operation does not run. Otherwise XYZ = 6 drops both translation caches, and XYZ 0–3 records the fence tag from plan 07.
 
 ### Machine specials (§40–42, §45, §48, plan 04)
 
@@ -144,7 +144,7 @@ A page-table entry holds a physical page number, an address-space number `n` tha
 
 A translation cache remembers recent pages, separately for instructions and data. `LDVTS` looks up a key, optionally replaces the protection nybble, and returns 0, 1, 2, or 3 according to which cache held the key. `SYNC` with `XYZ = 6` drops those caches.
 
-With the flag on, that walk, those caches, the `f = 1` trap (`rXX` high tetra `#x03000000`), and ropcode 3’s insert of `rZZ` are live. A physical result at or above `2^48` calls `vm-mmio` and is not cached. A register-stack spill onto a page without `pw` writes through `rC` and then raises bit 31 of `rQ`. The 4096-byte vectors in `vm-memory` are the physical backing store. Line caches and `SYNCD`/`SYNCID` remain plan 07.
+With the flag on, that walk, those caches, the `f = 1` trap (`rXX` high tetra `#x03000000`), and ropcode 3’s insert of `rZZ` are live. A physical result at or above `2^48` calls `vm-mmio` and is not cached. A register-stack spill onto a page without `pw` writes through `rC` and then raises bit 31 of `rQ`. The 4096-byte vectors in `vm-memory` are the physical backing store. Line caches live behind `:caches t` (plan 07).
 
 ## Caches, ordering, and one-processor `SYNC` (§30–31, plan 07)
 
@@ -169,7 +169,7 @@ On a machine with a write buffer or a write-back data cache:
 | 7 | Drop instruction and data caches, discarding dirty data. Privileged |
 | > 7 | Illegal instruction |
 
-`XYZ ≥ 4` from a user address raises the privileged-instruction interrupt (`k`) unless that interrupt is disabled. `SYNC` XYZ = 6 already drops both translation caches when virtual memory is on. `SYNCD`, `SYNCID`, `PRELD`, `PREGO`, and `PREST` still retire without changing memory order, and `LDUNC`/`STUNC` are `LDOU`/`STOU`.
+`XYZ ≥ 4` from a nonnegative PC raises `k` when that bit of `rK` is set, and the cache operation does not run. With `:caches t`, XYZ 0–3 records `:all`, `:store`, `:load`, or `:memory` until the next load or store retires. XYZ 4 sleeps the core until `wake-core` or a bit in `rQ`. XYZ 5 writes dirty data back. XYZ 6 drops the translation caches. XYZ 7 drops the instruction and data caches. A nonnegative `SYNCD` writes the dirty span back; a negative address also drops it. A nonnegative `SYNCID` drops the instruction-cache span and writebacks data; a negative address drops every cache and leaves memory unchanged. `LDUNC` reads memory without allocating. `STUNC` writes memory and drops the data line. The default VM, with caches off, still treats `LDUNC` as `LDOU`, `STUNC` as `STOU`, and `PRE*`/`SYNCD`/`SYNCID` as operations that do not change memory.
 
 `CSWAP` already updates one octa and `rP` inside a single `step-vm`. It is atomic only because nothing else runs. Plan 12 makes that atomic across processors.
 

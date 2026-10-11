@@ -185,7 +185,10 @@
   (profile nil)
   (traces nil)
   (sim-base 0 :type (unsigned-byte 64))
-  (sim-last nil))
+  (sim-last nil)
+  ;; Plan 11. pipe is NIL on the default VM. pipe-cycles counts step-cycle.
+  (pipe nil)
+  (pipe-cycles 0 :type unsigned-byte))
 
 ;;; Defined in src/translate.lisp. Guest loads and stores call them when
 ;;; virtual memory is on. A spill asks whether the stack page has pw.
@@ -205,8 +208,12 @@
 ;;; Defined in src/kernel.lisp.
 (declaim (ftype (function (t) t) install-kernel))
 
+;;; Defined in src/pipe.lisp.
+(declaim (ftype (function (t t) t) install-pipe)
+         (ftype (function (t) t) reset-pipe))
+
 (defun make-vm (&key (memory-size #x2000000) (pc 0) input legacy-putchar kernel
-                   virtual-memory caches cache-config profile)
+                   virtual-memory caches cache-config profile pipeline)
   "Create an MMIX VM. Without :KERNEL this is the user-mode interpreter.
 MEMORY-SIZE is the grow-on-touch page budget in bytes (at least one page).
 General registers use the rL/rG window; rG starts at 255 and rL at 0.
@@ -216,10 +223,13 @@ The register stack is rooted at Stack_Segment.
 The default leaves the four segments as an identity map, and LDVTS returns 0.
 :CACHES installs a write-back instruction cache and data cache. :CACHE-CONFIG
 is a plist of associativity, blocksize, writeback, writeallocate, accesstime,
-sets, and secondary. The default VM keeps caches off, so loads and stores
-still reach memory in the same step.
+sets, and secondary, plus the pipeline latencies add, multiply, divide, fadd,
+fmul, and fdiv. The default VM keeps caches off, so loads and stores still
+reach memory in the same step.
 :PROFILE T counts each retired tetra in vm-profile. The default leaves the
-slot empty, so step-vm does not allocate a table."
+slot empty, so step-vm does not allocate a table.
+:PIPELINE T overlaps fetch, decode, execute, memory, and write-back. The
+default leaves the pipe empty, so run-vm keeps calling step-vm."
   (unless (and (integerp memory-size) (plusp memory-size))
     (error "memory-size must be a positive integer"))
   (when (and virtual-memory (not kernel))
@@ -242,6 +252,8 @@ slot empty, so step-vm does not allocate a table."
       (install-kernel vm))
     (when caches
       (install-caches vm cache-config))
+    (when pipeline
+      (install-pipe vm cache-config))
     vm))
 
 (defun init-files (vm)
@@ -269,7 +281,8 @@ slot empty, so step-vm does not allocate a table."
         (fill-pointer (vm-stack vm)) 0
         (vm-stack-alert vm) nil
         (vm-fence vm) nil
-        (vm-asleep vm) nil)
+        (vm-asleep vm) nil
+        (vm-pipe-cycles vm) 0)
   (reset-line-caches vm)
   (clrhash (vm-itc vm))
   (clrhash (vm-dtc vm))
@@ -296,6 +309,7 @@ slot empty, so step-vm does not allocate a table."
     (clrhash (vm-memory vm))
     (setf (vm-mem-bytes vm) 0))
   (sync-stack vm)
+  (reset-pipe vm)
   vm)
 
 (defun mem-size (vm)

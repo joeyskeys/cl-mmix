@@ -312,8 +312,9 @@ Masking rA and clamping rG still count as a successful PUT."
                 (terpri out))))))))
 
 (defun sim-status (vm)
-  (format nil "PC=#x~X  retired=~D  μ=~D  υ=~D~%"
-          (vm-pc vm) (vm-cycles vm) (vm-mem-cost vm) (vm-oops vm)))
+  (format nil "PC=#x~X  retired=~D  μ=~D  υ=~D  pipe=~D~%"
+          (vm-pc vm) (vm-cycles vm) (vm-mem-cost vm) (vm-oops vm)
+          (vm-pipe-cycles vm)))
 
 (defun sim-show-current (vm)
   (let ((last (vm-sim-last vm)))

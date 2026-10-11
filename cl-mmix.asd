@@ -3,7 +3,7 @@
   :description "User-mode MMIX virtual machine for educational MMIXAL programs"
   :author "cl-mmix"
   :license "GPL-3.0"
-  :version "0.15.0"
+  :version "0.16.0"
   :depends-on ()
   :serial t
   :components ((:module "src"
@@ -22,6 +22,7 @@
                                (:file "exec")))
                  (:file "trap")
                  (:file "ops")
+                 (:file "pipe")
                  (:file "asm")
                  ;; After the assembler: the trap ROM is an assembled tetra image.
                  (:file "kernel")

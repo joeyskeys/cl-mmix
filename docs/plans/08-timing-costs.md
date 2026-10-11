@@ -61,4 +61,4 @@ A faulting floating-point opcode, before plan 01, adds nothing because it does n
 
 ## Follow-ons
 
-Plan 11 reports pipeline cycles in a third slot and leaves these §50 totals available as the hand-estimate line. Plan 10 prints both in the statistics command.
+Plan 11 reports pipeline cycles in `vm-pipe-cycles` and leaves these §50 totals available as the hand-estimate line. Plan 10 prints both, plus `pipe=`, in the statistics command.

@@ -1,6 +1,6 @@
 # cl-mmix vs a full MMIX machine
 
-This document is the gap between the sources described in [IMPLEMENTATION.md](IMPLEMENTATION.md) (ASDF system `cl-mmix` 0.15.0) and a complete MMIX. It replaces the older write-up, which compared an early MVP (flat registers, about 64 opcodes, a private putchar `TRAP`) with a user-mode practice target. That user-mode target is what the tree implements now. The paragraphs below describe what is still missing after it.
+This document is the gap between the sources described in [IMPLEMENTATION.md](IMPLEMENTATION.md) (ASDF system `cl-mmix` 0.16.0) and a complete MMIX. It replaces the older write-up, which compared an early MVP (flat registers, about 64 opcodes, a private putchar `TRAP`) with a user-mode practice target. That user-mode target is what the tree implements now. The paragraphs below describe what is still missing after it.
 
 The work that closes each gap is a separate plan under [plans/](plans/00-roadmap.md).
 
@@ -18,7 +18,7 @@ Out of scope, and absent from the plans: proposals that change version 1.0.0 (a 
 
 ## Sources
 
-Current behavior: [IMPLEMENTATION.md](IMPLEMENTATION.md), then `src/machine.lisp`, `src/cache.lisp`, `src/decode.lisp`, `src/ops.lisp`, `src/trap.lisp`, `src/kernel.lisp`, `src/translate.lisp`, `src/asm.lisp`, `src/mmo.lisp`, `src/mmixal.lisp`, `src/api.lisp`, `src/sim.lisp`, `tests/tests.lisp`.
+Current behavior: [IMPLEMENTATION.md](IMPLEMENTATION.md), then `src/machine.lisp`, `src/cache.lisp`, `src/decode.lisp`, `src/ops.lisp`, `src/pipe.lisp`, `src/trap.lisp`, `src/kernel.lisp`, `src/translate.lisp`, `src/asm.lisp`, `src/mmo.lisp`, `src/mmixal.lisp`, `src/api.lisp`, `src/sim.lisp`, `tests/tests.lisp`.
 
 Specification:
 
@@ -31,7 +31,7 @@ Where this file and the code disagree, the code wins for “implemented” and `
 
 ## Baseline already in the tree
 
-These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (160 checks) and must keep `make-vm` usable as a user-mode interpreter.
+These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (173 checks) and must keep `make-vm` usable as a user-mode interpreter.
 
 - All 256 opcode bytes are named in `src/decode.lisp`.
 - Integer arithmetic, shifts, compares, bitwise ops, wyde immediates, conditional sets, branches (including backward and probable forms), `JMP`/`GETA`/`GO`/`PUSHJ`/`PUSHGO`/`POP`, tetra and immediate loads and stores, `LDHT`/`STHT`/`STCO`/`CSWAP`/`MOR`/`MXOR`.
@@ -43,7 +43,7 @@ These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (
 - MMIX-SIM `TRAP` services Y = 0…10, intercepted in Lisp. Handles 0–2 are StdIn, StdOut, StdErr. Legacy putchar is opt-in.
 - S-expression assembler, an MMIXAL subset (`assemble-mms`, `load-mms`, `write-mmo`), `.mmo` loader, breakpoints, `step-vm` / `run-vm` / `continue-vm`, dumps.
 
-`vm-cycles` counts one per `step-vm` that passes an execute breakpoint. `vm-mems` counts loads and stores, including operations §50 leaves out of μ. `vm-oops` and `vm-mem-cost` are the §50 υ and μ totals. That is still not a pipeline.
+`vm-cycles` counts one retirement. `vm-pipe-cycles` counts one `step-cycle` when `:pipeline t` is set, and stays 0 on the default VM. `vm-mems` counts loads and stores, including operations §50 leaves out of μ. `vm-oops` and `vm-mem-cost` are the §50 υ and μ totals.
 
 ## Catalog
 
@@ -55,11 +55,11 @@ These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (
 | [04](plans/04-machine-specials.md) | `rC` `rF` `rI` `rN` `rU` | Implemented. `rN` frozen, `rI` sets `rQ` bit 6, `rU` counts retired opcodes, `rF` records a refused page. `rC` is consulted on a stack spill when virtual memory is on | Interval delivery through `rTT` is plan 05 |
 | [05](plans/05-kernel-traps.md) | Forced and dynamic traps | Implemented behind `:kernel`. Default `make-vm` still uses Lisp `exec-trap`, faults on bit 63, and ignores privileged `PUT` | `rT` / `rTT`, `rK`/`rQ`, `rwxnkbsp`, `RESUME 1`, kernel ROM for MMIX-SIM |
 | [06](plans/06-virtual-memory.md) | `rV` translation | Implemented behind `:virtual-memory` (requires `:kernel`). Default `make-vm` keeps the identity map and `LDVTS` returns 0 | Same walk; line caches landed in plan 07 |
-| [07](plans/07-cache-and-sync.md) | Caches and `SYNC` | Implemented behind `:caches`. Default `make-vm` still stores straight to memory. `SYNC` 0–3 records a fence tag | Same caches; hit and miss delays are plan 11 |
-| [08](plans/08-timing-costs.md) | μ and υ | Implemented. `vm-oops` and `vm-mem-cost` follow §50, including mispredicted branches. `vm-cycles`, `vm-mems`, and `rI` keep their old meanings | Pipeline cycle counts are plan 11 |
+| [07](plans/07-cache-and-sync.md) | Caches and `SYNC` | Implemented behind `:caches`. Default `make-vm` still stores straight to memory. `SYNC` 0–3 records a fence tag. With the pipe and caches, M uses `accesstime` for a hit and a miss alike | A split hit/miss delay and a write buffer |
+| [08](plans/08-timing-costs.md) | μ and υ | Implemented. `vm-oops` and `vm-mem-cost` follow §50, including mispredicted branches. `vm-cycles`, `vm-mems`, and `rI` keep their old meanings. `:pipeline t` adds `vm-pipe-cycles` | The §50 totals stay available beside the pipe |
 | [09](plans/09-mmixal.md) | MMIXAL | Implemented. `.mms` text through `assemble-mms` / `load-mms` / `write-mmo`: `LOC`, `IS`, `GREG`, `PREFIX`, `LOCAL`, data, expressions, local labels, `BSPEC` | The `mmixal` macro language |
-| [10](plans/10-simulator-session.md) | MMIX-SIM session | Implemented. `:argv` enters through `UNSAVE` with `$0` = argc, `$1` = argv, and `rL` = 2. Text modes translate newlines. `sim-command` reads one line. `:profile t` counts retired tetras | Pipeline cycles on the `s` line are plan 11 |
-| [11](plans/11-pipeline.md) | Pipeline | One instruction retires before the next is fetched | Configurable F–D–X–M–W pipeline, one core, as in MMMIX |
+| [10](plans/10-simulator-session.md) | MMIX-SIM session | Implemented. `:argv` enters through `UNSAVE` with `$0` = argc, `$1` = argv, and `rL` = 2. Text modes translate newlines. `sim-command` reads one line. `:profile t` counts retired tetras. `s` prints `pipe=` | Same session |
+| [11](plans/11-pipeline.md) | Pipeline | Implemented behind `:pipeline`. F–D–X–M–W, X scoreboard, M/W bypass into D, probable branches predict taken. Default `make-vm` still retires one instruction before the next fetch | No reorder buffer, no speculative store, no second core |
 | [12](plans/12-multicore.md) | Several processors | One `vm` struct | Shared physical memory, atomic `CSWAP`, `SYNC` fences, per-core `rQ` |
 
 Dependency order is in the [roadmap](plans/00-roadmap.md). Plans 01, 02, 03, 08, and 09 can start from today’s tree. Plans 05–07, 11, and 12 stack.
@@ -190,9 +190,9 @@ On a machine with a write buffer or a write-back data cache:
 | `CSWAP` | 2μ + 2υ |
 | `SAVE`, `UNSAVE` | 20μ + υ |
 
-Prediction in that table: ordinary branches predict not taken, probable branches (`PB*`) predict taken. `charge` applies that table when an instruction retires. `LDSF`/`STSF` cost 4υ and 1μ. `PUSHGO` costs 3υ and no μ. `vm-cycles` and `vm-mems` stay beside `vm-oops` and `vm-mem-cost`. Plan 11, when a pipeline is enabled, reports pipeline cycles in a third slot and leaves these §50 totals available.
+Prediction in that table: ordinary branches predict not taken, probable branches (`PB*`) predict taken. `charge` applies that table when an instruction retires, on the interpreter and on the pipe. `LDSF`/`STSF` cost 4υ and 1μ. `PUSHGO` costs 3υ and no μ. `vm-cycles` and `vm-mems` stay beside `vm-oops` and `vm-mem-cost`. `:pipeline t` counts `vm-pipe-cycles` as well, and `s` prints that count.
 
-MMMIX’s pipeline has stages F, D, X, M, W, with X split into XF (add), XM (multiply), and XD (divide). A configuration file sets functional-unit latencies and up to five caches (instruction, data, secondary, and two translation caches): associativity, block size, write-back, write-allocate, access time, ports, replacement. `mmmix` simulates one processor. Plan 11 is that one processor. It does not grow a second core; plan 12 does.
+`src/pipe.lisp` is one processor of stages F, D, X, M, and W. X uses the §50 unit times: add 1, multiply 10, divide 60, float add 4, float multiply 4, float divide and square root 40. `:cache-config` can set `add`, `multiply`, `divide`, `fadd`, `fmul`, and `fdiv` lower. A memory operation spends `accesstime` in M when caches are on and one cycle otherwise. A destination is busy while its writer occupies X. M and W forward to D in that same cycle, so a load-use costs one extra pipeline cycle. Stores commit in `execute` at W, when the instruction is oldest. The pipe does not model a second core, a reorder buffer, or a different delay for a cache hit and a cache miss. Plan 12 duplicates this pipe per core.
 
 ## Several processors (§31, plan 12)
 
@@ -200,7 +200,7 @@ The architecture’s multiprocessor rules are `CSWAP` and `SYNC`. There is no sp
 
 The full machine in this repository is still a multiprocessor, with these implementation choices written down in plan 12 so two cores have one meaning:
 
-- Each core has its own general registers, special registers, `PC`, and (once plan 11 exists) pipeline.
+- Each core has its own general registers, special registers, `PC`, and pipeline.
 - Physical memory is shared. Virtual memory is per core, because each core has its own `rV`.
 - `CSWAP` locks the target octa for the duration of the compare and the possible store.
 - `SYNC` XYZ = 0…3 is a fence on that core’s accesses to the shared memory. XYZ = 5…7 also maintain that core’s caches. A fence does not stall another core except through the shared-memory order the fence creates.

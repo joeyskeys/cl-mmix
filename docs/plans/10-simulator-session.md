@@ -1,6 +1,6 @@
 # Plan 10 — Simulator session
 
-Status: implemented. `src/sim.lisp` builds the `:argv` image and reads `sim-command`. Text modes translate newlines in `src/trap.lisp`. `:profile t` counts retired tetras. Pipeline cycles on the `s` line remain plan 11.
+Status: implemented. `src/sim.lisp` builds the `:argv` image and reads `sim-command`. Text modes translate newlines in `src/trap.lisp`. `:profile t` counts retired tetras. `s` prints `pipe=` from `vm-pipe-cycles`.
 
 Depends on [03](03-save-unsave.md) for the startup `UNSAVE`, on [05](05-kernel-traps.md) so that startup is a real `UNSAVE` under the ROM, and on [08](08-timing-costs.md) for the statistics line. Text-mode newline translation can land before the kernel, behind the same file objects.
 
@@ -85,4 +85,4 @@ Lisp-level `step-vm` and `breakpoint`. `Fread`/`Fgets` return codes. `:legacy-pu
 
 ## Follow-ons
 
-Plan 11’s statistics line adds pipeline cycles next to μ and υ. The command parser does not grow a second syntax for that; `s` prints whatever slots exist.
+Plan 11’s statistics line adds pipeline cycles next to μ and υ. The command parser does not grow a second syntax for that; `s` prints `pipe=` from `vm-pipe-cycles`.

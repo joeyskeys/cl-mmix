@@ -23,6 +23,10 @@
    #:vm-symbols
    #:vm-legacy-putchar
    #:vm-profile
+   #:vm-pipe-cycles
+   #:step-cycle
+   #:pipe-stage-pc
+   #:pipe-drain-count
    #:sim-command
    ;; Memory / registers
    #:mem-size

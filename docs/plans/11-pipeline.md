@@ -1,5 +1,7 @@
 # Plan 11 — Pipeline
 
+Status: implemented. `src/pipe.lisp` overlaps F, D, X, M, and W when `make-vm` is called with `:pipeline t`. Functional results still come from `execute` at write-back. The default VM leaves the pipe empty and `run-vm` keeps calling `step-vm`. M and W forward to D, so a load-use costs one extra `vm-pipe-cycles`. `s` prints that counter.
+
 Depends on [01](01-floating-point.md), [02](02-trips-and-resume.md), [03](03-save-unsave.md), and [07](07-cache-and-sync.md), so every opcode the pipe can issue has a finished functional meaning and a cache.
 
 Spec: [MMMIX](https://mmix.cs.hm.edu/doc/mmmix.pdf) and [mmix-pipe](https://mmix.cs.hm.edu/doc/mmix-pipe.pdf). One processor. Multiprocessing stays in plan 12.

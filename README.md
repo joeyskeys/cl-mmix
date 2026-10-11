@@ -2,7 +2,7 @@
 
 A user-mode **MMIX** virtual machine in portable Common Lisp (tested on SBCL).
 
-It runs educational MMIXAL: the integer and floating-point instruction sets, the register stack, the four address segments, MMIX-SIM traps, and `.mmo` object files. It is not an MMIXware replacement: there is no pipeline. Page tables run when `make-vm` is called with `:kernel t` and `:virtual-memory t`. The default VM still uses a flat map of the four segments, and stores go straight to memory. `:caches t` adds write-back instruction and data caches.
+It runs educational MMIXAL: the integer and floating-point instruction sets, the register stack, the four address segments, MMIX-SIM traps, and `.mmo` object files. `:pipeline t` overlaps fetch, decode, execute, memory, and write-back on one core. The default VM still retires one instruction before the next fetch. Page tables run when `make-vm` is called with `:kernel t` and `:virtual-memory t`. The default VM still uses a flat map of the four segments, and stores go straight to memory. `:caches t` adds write-back instruction and data caches.
 
 What the code actually does, opcode by opcode, is written in [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md). The distance from that code to a full MMIX machine is [docs/TAOCP-GAP-ANALYSIS.md](docs/TAOCP-GAP-ANALYSIS.md), and the sequence of plans is [docs/plans/00-roadmap.md](docs/plans/00-roadmap.md).
 
@@ -179,11 +179,11 @@ Each `:org` is its own segment. `PC` becomes the first origin, so put code befor
 
 | Function | Role |
 |----------|------|
-| `make-vm` | `:memory-size` page budget, `:pc`, `:input`, `:legacy-putchar`, `:kernel`, `:virtual-memory`, `:caches`, `:cache-config`, `:profile` |
+| `make-vm` | `:memory-size` page budget, `:pc`, `:input`, `:legacy-putchar`, `:kernel`, `:virtual-memory`, `:caches`, `:cache-config`, `:profile`, `:pipeline` |
 | `wake-core` | Leave the sleep entered by `SYNC` 4 |
 | `assemble` / `assemble-into` / `load-program` / `load-mmo` | Build and load s-expressions or `.mmo`. `load-mmo` takes `:argv` |
 | `assemble-mms` / `load-mms` / `write-mmo` | Assemble `.mms` text and write `.mmo` |
-| `step-vm` / `run-vm` / `continue-vm` | Execute |
+| `step-vm` / `step-cycle` / `run-vm` / `continue-vm` | Execute. `step-cycle` advances F–D–X–M–W when `:pipeline t` |
 | `reg` / `set-reg` / `special-reg` / `set-special` | Register window and raw specials |
 | `mem-ref-u*` / `mem-set-u*` | Big-endian memory |
 | `breakpoint` / `clear-breakpoints` | Breakpoints |
@@ -198,12 +198,12 @@ sbcl --script tests/run-tests.lisp
 
 ## Limitations
 
-[docs/TAOCP-GAP-ANALYSIS.md](docs/TAOCP-GAP-ANALYSIS.md) is the gap between this tree and a full machine (kernel, remaining opcodes, virtual memory, pipeline, and multi-core). [docs/plans/00-roadmap.md](docs/plans/00-roadmap.md) is the order of work. The largest holes:
+[docs/TAOCP-GAP-ANALYSIS.md](docs/TAOCP-GAP-ANALYSIS.md) is the gap between this tree and a full machine (kernel, remaining opcodes, virtual memory, a deeper pipeline, and multi-core). [docs/plans/00-roadmap.md](docs/plans/00-roadmap.md) is the order of work. The largest holes:
 
-- No pipeline. §50 μ and υ are `vm-mem-cost` and `vm-oops`. `vm-cycles` still counts one per `step-vm` that passes an execute breakpoint, and `vm-mems` still counts load and store operations. Dynamic traps and `RESUME 1` run when `make-vm` is called with `:kernel t`. Page tables run with `:virtual-memory t` as well. The default VM still has neither, and bit 63 of an address still faults there. `LDVTS` returns 0 on that default VM.
+- The default VM is still one instruction at a time. `:pipeline t` is one core of F–D–X–M–W with no reorder buffer and no second core. Stores commit at write-back. Hit and miss share one M latency. §50 μ and υ stay `vm-mem-cost` and `vm-oops`. `vm-cycles` counts retirements. `vm-pipe-cycles` counts pipeline cycles, and `s` prints them. Dynamic traps and `RESUME 1` run when `make-vm` is called with `:kernel t`. Page tables run with `:virtual-memory t` as well. The default VM still has neither, and bit 63 of an address still faults there. `LDVTS` returns 0 on that default VM.
 - `RESUME 1` (`Z ≠ 0`) on the default VM is still the unimplemented path. `RESUME 0` inserts ropcodes 0–2.
-- `SWYM` does not halt. With caches off, `PRE*`/`SYNCD`/`SYNCID` change nothing and `LDUNC`/`STUNC` are ordinary octa accesses. `:caches t` writebacks dirty lines and records `SYNC` 0–3 as a fence tag. Hit and miss delays are still absent. `SYNC` 6 drops the translation caches when virtual memory is on.
-- `s` prints μ and υ. Pipeline cycles are still absent.
+- `SWYM` does not halt. With caches off, `PRE*`/`SYNCD`/`SYNCID` change nothing and `LDUNC`/`STUNC` are ordinary octa accesses. `:caches t` writebacks dirty lines and records `SYNC` 0–3 as a fence tag. With the pipe on, a cache hit and a cache miss still take the same M latency. `SYNC` 6 drops the translation caches when virtual memory is on.
+- `s` prints `PC`, retired instructions, μ, υ, and `pipe=`.
 - MMIXAL macros are not implemented. `LOC`, `IS`, `GREG`, `PREFIX`, `LOCAL`, data, expressions, and ordinary instructions assemble from `.mms` text.
 
 ## License

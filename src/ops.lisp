@@ -690,9 +690,9 @@ A normal return charges §50. A signal does not: the instruction did not retire.
         (setf (gethash pc table) (1+ (gethash pc table 0))))))
   vm)
 
-(defun note-sim-fetch (vm)
+(defun note-sim-fetch (vm &optional (pc (vm-pc vm)))
   "Print a traced tetra as it is fetched, including inside continue-vm."
-  (let ((pc (logand (vm-pc vm) (lognot 3))))
+  (let ((pc (logand (u64 pc) (lognot 3))))
     (when (member pc (vm-traces vm) :test #'=)
       (format *standard-output* "trace #x~X: ~A~%" pc (disassemble-at vm pc))))
   vm)
@@ -759,16 +759,27 @@ bit appears in rQ."
     (setf (vm-break vm) (vm-watch-hit vm)))
   vm)
 
+;;; Defined in src/pipe.lisp. run-vm calls it only when :pipeline installed a pipe.
+(declaim (ftype (function (t) t) step-cycle))
+
 (defun run-vm (vm &key (max-cycles 100000))
   "Run until halt, breakpoint, power-save, or MAX-CYCLES.
 Signals an error if the cycle limit is hit without halt, a breakpoint,
-or SYNC 4."
-  (loop
-    (when (or (vm-halted vm) (vm-break vm) (vm-asleep vm))
-      (return vm))
-    (when (>= (vm-cycles vm) max-cycles)
-      (error "VM exceeded max-cycles (~D) at PC=#x~X" max-cycles (vm-pc vm)))
-    (step-vm vm))
+or SYNC 4. With :pipeline t the limit counts vm-pipe-cycles. Otherwise
+it counts vm-cycles, one per step-vm that passes an execute breakpoint."
+  (if (vm-pipe vm)
+      (loop
+        (when (or (vm-halted vm) (vm-break vm) (vm-asleep vm))
+          (return vm))
+        (when (>= (vm-pipe-cycles vm) max-cycles)
+          (error "VM exceeded max-cycles (~D) at PC=#x~X" max-cycles (vm-pc vm)))
+        (step-cycle vm))
+      (loop
+        (when (or (vm-halted vm) (vm-break vm) (vm-asleep vm))
+          (return vm))
+        (when (>= (vm-cycles vm) max-cycles)
+          (error "VM exceeded max-cycles (~D) at PC=#x~X" max-cycles (vm-pc vm)))
+        (step-vm vm)))
   vm)
 
 (defun continue-vm (vm &rest keys &key &allow-other-keys)

@@ -56,4 +56,4 @@ Alignment, endianness, and the results of loads and stores when caches are off. 
 
 ## Follow-ons
 
-Plan 11 adds hit and miss delays from `accesstime`. Plan 12 keeps one cache per core and uses the fence tags as the memory order between cores.
+Plan 11 uses `accesstime` as the M-stage latency when `:caches` and `:pipeline` are both on. A hit and a miss take that same latency. Plan 12 keeps one cache per core and uses the fence tags as the memory order between cores.

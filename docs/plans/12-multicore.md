@@ -1,5 +1,7 @@
 # Plan 12 — Multi-core
 
+Status: implemented. `make-machine` holds N cores and one physical memory. `make-vm` is still the one-core constructor. `CSWAP` locks the target octa. `SYNC` 5 and 7 touch only the core that executes them. A store to physical `#x1000000000008` sets bit 1 of another core’s `rQ`.
+
 Depends on [05](05-kernel-traps.md), [06](06-virtual-memory.md), and [07](07-cache-and-sync.md). If [11](11-pipeline.md) has landed, each core carries its own pipe. The functional scheduler does not require the pipe.
 
 Spec: `mmix-doc` §31. MMMIX’s introduction excludes multiprocessing; the choices below are this repository’s, written here so two cores have one meaning.

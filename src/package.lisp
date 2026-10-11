@@ -4,6 +4,11 @@
    ;; Machine
    #:vm
    #:make-vm
+   #:machine
+   #:make-machine
+   #:machine-cores
+   #:step-core
+   #:run-machine
    #:vm-memory
    #:vm-registers
    #:vm-pc

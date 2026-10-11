@@ -264,24 +264,42 @@
   :jump)
 
 (defun exec-cswap (vm inst)
-  (let ((addr (aligned-addr vm inst 3)))
-    (when (and (vm-virtual-memory vm)
-               (not (nth-value 1 (translate vm addr :cswap))))
-      (incf (vm-mems vm))
-      (clear-vm-fence vm)
-      (set-reg vm (inst-x inst) 0)
-      (return-from exec-cswap nil)))
-  (incf (vm-mems vm))
-  (let* ((addr (aligned-addr vm inst 3))
-         (mem (mem-ref-u64 vm addr))
-         (rp (special-reg vm +r-p+)))
-    (if (= mem rp)
-        (progn
-          (mem-set-u64 vm addr (reg vm (inst-x inst)))
-          (set-reg vm (inst-x inst) 1))
-        (progn
-          (set-special vm +r-p+ mem)
-          (set-reg vm (inst-x inst) 0))))
+  "Compare-and-swap one physical octa. The lock covers the read and the
+store that follows it, including when the physical address is 0."
+  (let ((addr (aligned-addr vm inst 3))
+        (key 0)
+        (lock-p nil))
+    (if (vm-virtual-memory vm)
+        (multiple-value-bind (phys ok) (translate vm addr :cswap)
+          (unless ok
+            (incf (vm-mems vm))
+            (clear-vm-fence vm)
+            (set-reg vm (inst-x inst) 0)
+            (return-from exec-cswap nil))
+          (setf key (logand (u64 phys) (lognot 7))
+                lock-p t))
+        (multiple-value-bind (phys ok) (resolve-identity-address vm addr)
+          (when ok
+            (setf key (logand (u64 phys) (lognot 7))
+                  lock-p t))))
+    (incf (vm-mems vm))
+    (let ((locks (machine-locks (vm-host vm))))
+      (when lock-p
+        (when (gethash key locks)
+          (error "CSWAP reentered on physical octa #x~X" key))
+        (setf (gethash key locks) t))
+      (unwind-protect
+          (let* ((mem (mem-ref-u64 vm addr))
+                 (rp (special-reg vm +r-p+)))
+            (if (= mem rp)
+                (progn
+                  (mem-set-u64 vm addr (reg vm (inst-x inst)))
+                  (set-reg vm (inst-x inst) 1))
+                (progn
+                  (set-special vm +r-p+ mem)
+                  (set-reg vm (inst-x inst) 0))))
+        (when lock-p
+          (remhash key locks)))))
   (clear-vm-fence vm)
   nil)
 
@@ -788,3 +806,62 @@ it counts vm-cycles, one per step-vm that passes an execute breakpoint."
     (setf (vm-break-skip vm) t
           (vm-break vm) nil))
   (apply #'run-vm vm keys))
+
+(defun core-runnable-p (vm)
+  "A halted core is skipped. An asleep core is skipped while rQ is zero,
+so an inter-processor interrupt can wake it on the next turn."
+  (and (not (vm-halted vm))
+       (not (vm-break vm))
+       (or (not (vm-asleep vm))
+           (not (zerop (special-reg vm +r-q+))))))
+
+(defun step-core (vm)
+  "Retire the next instruction on this core. A pipe advances until vm-cycles
+increases or the core halts, breaks, or sleeps with rQ clear. Without a
+pipe this is step-vm."
+  (cond ((or (vm-halted vm) (vm-break vm)) vm)
+        ((not (vm-pipe vm)) (step-vm vm))
+        (t
+         (let ((before (vm-cycles vm))
+               (guard 0))
+           (loop
+             (when (or (vm-halted vm)
+                       (vm-break vm)
+                       (and (vm-asleep vm)
+                            (zerop (special-reg vm +r-q+)))
+                       (> (vm-cycles vm) before))
+               (return vm))
+             (when (> (incf guard) 1000000)
+               (error "step-core made no progress at PC=#x~X" (vm-pc vm)))
+             (step-cycle vm))))))
+
+(defun run-machine (machine &key (max-cycles 100000))
+  "Retire one instruction from each runnable core in turn.
+Stop when every core has halted, a breakpoint has fired, or no core is
+runnable. MAX-CYCLES counts the sum of vm-cycles deltas, including a
+dynamic trap. Hitting that limit with a core still runnable signals an error."
+  (let ((spent 0)
+        (cores (machine-cores machine)))
+    (loop
+      (when (or (every #'vm-halted cores)
+                (some #'vm-break cores)
+                (not (some #'core-runnable-p cores)))
+        (return machine))
+      (when (>= spent max-cycles)
+        (error "machine exceeded max-cycles (~D)" max-cycles))
+      (loop for vm across cores
+            do (when (core-runnable-p vm)
+                 (let ((before (vm-cycles vm)))
+                   (step-core vm)
+                   (incf spent (max 0 (- (vm-cycles vm) before))))
+                 (when (or (vm-break vm)
+                           (every #'vm-halted cores)
+                           (not (some #'core-runnable-p cores)))
+                   (return-from run-machine machine))
+                 (when (>= spent max-cycles)
+                   (unless (or (every #'vm-halted cores)
+                               (some #'vm-break cores)
+                               (not (some #'core-runnable-p cores)))
+                     (error "machine exceeded max-cycles (~D)" max-cycles))
+                   (return-from run-machine machine))))))
+  machine)

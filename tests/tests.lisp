@@ -2373,6 +2373,227 @@
                  (reg vm 1)))
          (list t t 1))
 
+  (check cores-1-hello
+         (let ((alone (make-vm))
+               (core (aref (machine-cores (make-machine :cores 1)) 0)))
+           (dolist (vm (list alone core))
+             (assemble-into vm (list* 'program (pipe-hello-forms)))
+             (run-vm vm))
+           (list (equal (pipe-facts alone) (pipe-facts core))
+                 (coerce (vm-output core) 'string)))
+         (list t "HELLO"))
+
+  (check cores-1-page-budget
+         (labels ((refused (vm)
+                    (assemble-into vm
+                      '(program (:org 0)
+                        (setl $1 1)
+                        (stb $1 $0 0)
+                        (setl $2 4096)
+                        (stb $1 $2 0)
+                        (trap 0 0 0)))
+                    (run-vm vm)
+                    (list (special-reg vm cl-mmix::+r-f+)
+                          (and (vm-fault vm)
+                               (search "memory limit exceeded" (vm-fault vm))
+                               t)
+                          (vm-halted vm)
+                          (mem-size vm))))
+           (equal (refused (make-vm :memory-size 64))
+                  (refused (aref (machine-cores
+                                  (make-machine :cores 1 :memory-size 64))
+                                 0))))
+         t)
+
+  (check cores-1-cswap
+         (labels ((swapped (vm)
+                    (assemble-into vm
+                      '(program (:org 0) (cswap $1 $2 $0) (trap 0 0 0)))
+                    (set-reg vm 1 9)
+                    (set-reg vm 2 #x200)
+                    (set-special vm +r-p+ 5)
+                    (mem-set-u64 vm #x200 5)
+                    (run-vm vm)
+                    (list (reg vm 1) (mem-ref-u64 vm #x200) (special-reg vm +r-p+))))
+           (equal (swapped (make-vm))
+                  (swapped (aref (machine-cores (make-machine :cores 1)) 0))))
+         t)
+
+  (check two-core-sync3
+         (let* ((machine (make-machine :cores 2))
+                (c0 (aref (machine-cores machine) 0))
+                (c1 (aref (machine-cores machine) 1)))
+           (assemble-into c0
+             '(program
+               (:org #x100)
+               (setl $1 #x55)
+               (setl $2 #x200)
+               (stoui $1 $2 0)
+               (sync 3)
+               (trap 0 0 0)
+               (:org #x180)
+               (swym)
+               (swym)
+               (swym)
+               (setl $2 #x200)
+               (ldoui $3 $2 0)
+               (trap 0 0 0)))
+           (setf (vm-pc c1) #x180)
+           (run-machine machine)
+           (list (eq (vm-memory c0) (vm-memory c1))
+                 (reg c1 3)
+                 (mem-ref-u64 c0 #x200)
+                 (vm-halted c0)
+                 (vm-halted c1)))
+         (list t #x55 #x55 t t))
+
+  (check two-core-cswap
+         (let* ((machine (make-machine :cores 2))
+                (c0 (aref (machine-cores machine) 0))
+                (c1 (aref (machine-cores machine) 1)))
+           (assemble-into c0
+             '(program
+               (:org #x100)
+               (setl $2 #x200)
+               (setl $1 42)
+               (cswap $1 $2 $0)
+               (trap 0 0 0)
+               (:org #x180)
+               (setl $2 #x200)
+               (setl $1 99)
+               (cswap $1 $2 $0)
+               (trap 0 0 0)))
+           (setf (vm-pc c1) #x180)
+           (run-machine machine)
+           (list (reg c0 1) (reg c1 1)
+                 (special-reg c1 +r-p+)
+                 (mem-ref-u64 c0 #x200)
+                 (vm-halted c0) (vm-halted c1)))
+         (list 1 0 42 42 t t))
+
+  (check ipi-before-user
+         (let* ((machine (make-machine :cores 2 :kernel t))
+                (c0 (aref (machine-cores machine) 0))
+                (c1 (aref (machine-cores machine) 1)))
+           (assemble-into c0
+             '(program
+               (:org #x100)
+               (seth $2 #x8001)
+               (orl $2 8)
+               (setl $1 1)
+               (stoui $1 $2 0)
+               (sync 4)
+               (:org #x200)
+               (setl $9 1)
+               (trap 0 0 0)
+               (:org #x300)
+               (setl $8 7)
+               (trap 0 0 0)))
+           (setf (vm-pc c0) #x8000000000000100
+                 (vm-pc c1) #x200
+                 (cl-mmix::vm-asleep c1) t)
+           ;; A negative PC sets p. Mask it so the store reaches the IPI
+           ;; register instead of trapping into the ROM on the next step.
+           (set-special c0 cl-mmix::+r-k+
+                        (logand #xffffffffffffffff
+                                (lognot cl-mmix::+rq-p+)))
+           (set-special c1 cl-mmix::+r-tt+ #x8000000000000300)
+           (breakpoint c1 #x8000000000000304)
+           (run-machine machine)
+           (list (reg c1 9)
+                 (reg c1 8)
+                 (special-reg c1 cl-mmix::+r-ww+)
+                 (logand (special-reg c1 cl-mmix::+r-q+) 2)
+                 (vm-break c1)))
+         (list 0 7 #x200 2 (list :exec #x8000000000000304)))
+
+  (check ipi-wake-255
+         (let* ((machine (make-machine :cores 2 :kernel t))
+                (c0 (aref (machine-cores machine) 0))
+                (c1 (aref (machine-cores machine) 1)))
+           (assemble-into c0
+             '(program
+               (:org #x100)
+               (seth $2 #x8001)
+               (orl $2 8)
+               (setl $1 255)
+               (stoui $1 $2 0)
+               (:org #x200)
+               (setl $9 1)
+               (trap 0 0 0)))
+           (setf (vm-pc c0) #x8000000000000100
+                 (vm-pc c1) #x200
+                 (cl-mmix::vm-asleep c1) t)
+           (set-special c0 cl-mmix::+r-k+
+                        (logand #xffffffffffffffff
+                                (lognot cl-mmix::+rq-p+)))
+           (dotimes (i 4) (step-core c0))
+           (let ((woken (list (cl-mmix::vm-asleep c1)
+                              (logand (special-reg c1 cl-mmix::+r-q+) 2))))
+             (step-core c1)
+             (list woken (reg c1 9) (vm-pc c1))))
+         (list (list nil 0) 1 #x204))
+
+  (check sync7-other-dirty
+         (let* ((machine (make-machine :cores 2 :caches t))
+                (c0 (aref (machine-cores machine) 0))
+                (c1 (aref (machine-cores machine) 1)))
+           (assemble-into c0
+             '(program
+               (:org #x100)
+               (swym)
+               (swym)
+               (swym)
+               (sync 7)
+               (trap 0 0 0)
+               (:org #x180)
+               (setl $1 #x99)
+               (setl $2 #x200)
+               (stoui $1 $2 0)
+               (swym)
+               (ldoui $3 $2 0)
+               (trap 0 0 0)))
+           (setf (vm-pc c1) #x180)
+           (run-machine machine)
+           (list (mem-ref-u64 c0 #x200 :physical t)
+                 (reg c1 3)
+                 (vm-halted c0)
+                 (vm-halted c1)))
+         (list 0 #x99 t t))
+
+  (check sync5-writeback-visible
+         (let* ((machine (make-machine :cores 2 :caches t))
+                (c0 (aref (machine-cores machine) 0))
+                (c1 (aref (machine-cores machine) 1)))
+           (assemble-into c0
+             '(program
+               (:org #x100)
+               (setl $1 #x55)
+               (setl $2 #x300)
+               (stoui $1 $2 0)
+               (swym)
+               (swym)
+               (sync 5)
+               (swym)
+               (trap 0 0 0)
+               (:org #x180)
+               (swym)
+               (swym)
+               (swym)
+               (setl $2 #x300)
+               (ldoui $3 $2 0)
+               (swym)
+               (ldunci $4 $2 0)
+               (trap 0 0 0)))
+           (setf (vm-pc c1) #x180)
+           (run-machine machine)
+           (list (reg c1 3)
+                 (reg c1 4)
+                 (mem-ref-u64 c0 #x300 :physical t)
+                 (vm-halted c0)
+                 (vm-halted c1)))
+         (list 0 #x55 #x55 t t))
+
   (run-float-tests)
 
   (format t "~%Results: ~D passed, ~D failed~%" *pass* *fail*)

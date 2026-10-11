@@ -73,6 +73,11 @@
 ;;; high-priority I/O bit of rQ (bit 31).
 (defconstant +rq-stack-overflow+ (ash 1 31))
 
+;;; Bit 1 of the machine byte. Bit 0 stays the power-failure bit. Bit 6 stays
+;;; the interval timer. A store to +IPI-PHYS+ sets this bit on one core.
+(defconstant +rq-ipi+ #x2)
+(defconstant +ipi-phys+ (+ (ash 1 48) 8))
+
 (defconstant +text-segment+  #x0000000000000000)
 (defconstant +data-segment+  #x2000000000000000)
 (defconstant +pool-segment+  #x4000000000000000)
@@ -127,10 +132,18 @@
   kind
   serial)
 
-(defstruct (vm (:constructor %make-vm))
+(defstruct (machine (:constructor %make-machine))
+  (cores (make-array 0) :type vector)
   (memory (make-hash-table :test 'eql) :type hash-table)
   (mem-bytes 0 :type unsigned-byte)
   (mem-limit #x2000000 :type unsigned-byte)
+  (mmio nil)
+  (locks (make-hash-table :test 'eql) :type hash-table))
+
+(defstruct (vm (:constructor %make-vm))
+  ;; Physical memory, the page budget, the MMIO hook, and the CSWAP lock
+  ;; table live on the machine. Every core of that machine shares them.
+  (host nil)
   (registers (make-array 256 :element-type '(unsigned-byte 64) :initial-element 0)
              :type (simple-array (unsigned-byte 64) (256)))
   (special (make-array 32 :element-type '(unsigned-byte 64) :initial-element 0)
@@ -169,7 +182,6 @@
   (trans-va 0 :type (unsigned-byte 64))
   (trans-pte 0 :type (unsigned-byte 64))
   (virtual-memory nil :type boolean)
-  (mmio nil)
   (itc (make-hash-table :test 'eql) :type hash-table)
   (dtc (make-hash-table :test 'eql) :type hash-table)
   (stack-alert nil :type boolean)
@@ -189,6 +201,26 @@
   ;; Plan 11. pipe is NIL on the default VM. pipe-cycles counts step-cycle.
   (pipe nil)
   (pipe-cycles 0 :type unsigned-byte))
+
+(defun vm-memory (vm)
+  "Physical page hash. Shared by every core of this VM's machine."
+  (machine-memory (vm-host vm)))
+
+(defun vm-mem-bytes (vm)
+  (machine-mem-bytes (vm-host vm)))
+
+(defun (setf vm-mem-bytes) (value vm)
+  (setf (machine-mem-bytes (vm-host vm)) value))
+
+(defun vm-mem-limit (vm)
+  (machine-mem-limit (vm-host vm)))
+
+(defun vm-mmio (vm)
+  "MMIO hook. A store or load at or above 2^48 calls it, except the IPI register."
+  (machine-mmio (vm-host vm)))
+
+(defun (setf vm-mmio) (value vm)
+  (setf (machine-mmio (vm-host vm)) value))
 
 ;;; Defined in src/translate.lisp. Guest loads and stores call them when
 ;;; virtual memory is on. A spill asks whether the stack page has pw.
@@ -212,30 +244,11 @@
 (declaim (ftype (function (t t) t) install-pipe)
          (ftype (function (t) t) reset-pipe))
 
-(defun make-vm (&key (memory-size #x2000000) (pc 0) input legacy-putchar kernel
-                   virtual-memory caches cache-config profile pipeline)
-  "Create an MMIX VM. Without :KERNEL this is the user-mode interpreter.
-MEMORY-SIZE is the grow-on-touch page budget in bytes (at least one page).
-General registers use the rL/rG window; rG starts at 255 and rL at 0.
-The register stack is rooted at Stack_Segment.
-:KERNEL installs the trap ROM, sets rT and rTT to its entry, and sets rK to all ones.
-:VIRTUAL-MEMORY requires :KERNEL and translates nonnegative addresses through rV.
-The default leaves the four segments as an identity map, and LDVTS returns 0.
-:CACHES installs a write-back instruction cache and data cache. :CACHE-CONFIG
-is a plist of associativity, blocksize, writeback, writeallocate, accesstime,
-sets, and secondary, plus the pipeline latencies add, multiply, divide, fadd,
-fmul, and fdiv. The default VM keeps caches off, so loads and stores still
-reach memory in the same step.
-:PROFILE T counts each retired tetra in vm-profile. The default leaves the
-slot empty, so step-vm does not allocate a table.
-:PIPELINE T overlaps fetch, decode, execute, memory, and write-back. The
-default leaves the pipe empty, so run-vm keeps calling step-vm."
-  (unless (and (integerp memory-size) (plusp memory-size))
-    (error "memory-size must be a positive integer"))
-  (when (and virtual-memory (not kernel))
-    (error ":virtual-memory requires :kernel t"))
+(defun make-core (&key host (pc 0) input legacy-putchar kernel virtual-memory
+                     caches cache-config profile pipeline)
+  "One processor. HOST is the machine that owns physical memory."
   (let ((vm (%make-vm
-             :mem-limit (max memory-size +page-size+)
+             :host host
              :pc (u64 pc)
              :input input
              :legacy-putchar (and legacy-putchar t)
@@ -255,6 +268,70 @@ default leaves the pipe empty, so run-vm keeps calling step-vm."
     (when pipeline
       (install-pipe vm cache-config))
     vm))
+
+(defun make-machine (&key (cores 1) (memory-size #x2000000) (pc 0) input
+                        legacy-putchar kernel virtual-memory caches
+                        cache-config profile pipeline)
+  "A machine with CORES processors and one physical memory.
+Each core has its own registers, PC, rV, caches, translation caches, and
+pipeline. The page hash, the page budget, the MMIO hook, and the CSWAP
+lock table are shared. CORES defaults to 1."
+  (unless (and (integerp cores) (plusp cores))
+    (error "cores must be a positive integer"))
+  (unless (and (integerp memory-size) (plusp memory-size))
+    (error "memory-size must be a positive integer"))
+  (when (and virtual-memory (not kernel))
+    (error ":virtual-memory requires :kernel t"))
+  (let ((machine (%make-machine :mem-limit (max memory-size +page-size+))))
+    (setf (machine-cores machine)
+          (make-array cores
+                      :initial-contents
+                      (loop repeat cores
+                            collect (make-core :host machine
+                                                :pc pc
+                                                :input input
+                                                :legacy-putchar legacy-putchar
+                                                :kernel kernel
+                                                :virtual-memory virtual-memory
+                                                :caches caches
+                                                :cache-config cache-config
+                                                :profile profile
+                                                :pipeline pipeline))))
+    machine))
+
+(defun make-vm (&key (memory-size #x2000000) (pc 0) input legacy-putchar kernel
+                   virtual-memory caches cache-config profile pipeline)
+  "Create an MMIX VM. Without :KERNEL this is the user-mode interpreter.
+The VM is the single core of a private machine. Slot accessors keep working
+on that core, and physical memory lives on the machine.
+MEMORY-SIZE is the grow-on-touch page budget in bytes (at least one page).
+General registers use the rL/rG window; rG starts at 255 and rL at 0.
+The register stack is rooted at Stack_Segment.
+:KERNEL installs the trap ROM, sets rT and rTT to its entry, and sets rK to all ones.
+:VIRTUAL-MEMORY requires :KERNEL and translates nonnegative addresses through rV.
+The default leaves the four segments as an identity map, and LDVTS returns 0.
+:CACHES installs a write-back instruction cache and data cache. :CACHE-CONFIG
+is a plist of associativity, blocksize, writeback, writeallocate, accesstime,
+sets, and secondary, plus the pipeline latencies add, multiply, divide, fadd,
+fmul, and fdiv. The default VM keeps caches off, so loads and stores still
+reach memory in the same step.
+:PROFILE T counts each retired tetra in vm-profile. The default leaves the
+slot empty, so step-vm does not allocate a table.
+:PIPELINE T overlaps fetch, decode, execute, memory, and write-back. The
+default leaves the pipe empty, so run-vm keeps calling step-vm."
+  (aref (machine-cores
+         (make-machine :cores 1
+                       :memory-size memory-size
+                       :pc pc
+                       :input input
+                       :legacy-putchar legacy-putchar
+                       :kernel kernel
+                       :virtual-memory virtual-memory
+                       :caches caches
+                       :cache-config cache-config
+                       :profile profile
+                       :pipeline pipeline))
+        0))
 
 (defun init-files (vm)
   (let ((v (make-array 256 :initial-element nil)))
@@ -438,7 +515,27 @@ that retires; an instruction inserted by RESUME is part of that RESUME."
   (set-special vm +r-f+ (u64 addr))
   0)
 
+(defun ipi-access (vm nbytes value write-p)
+  "Physical +IPI-PHYS+. A read returns 0 and leaves rF alone.
+A write's low byte is a core id: that core's rQ bit 1 is set.
+255 wakes every core and sets no rQ bit. Any other id is ignored."
+  (declare (ignore nbytes))
+  (unless write-p
+    (return-from ipi-access 0))
+  (let* ((id (logand (u64 value) #xff))
+         (cores (machine-cores (vm-host vm))))
+    (cond ((= id 255)
+           (loop for core across cores
+                 do (setf (vm-asleep core) nil)))
+          ((< id (length cores))
+           (let ((target (aref cores id)))
+             (set-special target +r-q+
+                          (logior (special-reg target +r-q+) +rq-ipi+))))))
+  0)
+
 (defun call-mmio (vm addr nbytes value write-p)
+  (when (= (logand (u64 addr) #x7fffffffffffffff) +ipi-phys+)
+    (return-from call-mmio (ipi-access vm nbytes value write-p)))
   (let ((hook (vm-mmio vm)))
     (if hook
         (funcall hook vm addr nbytes value write-p)
@@ -498,19 +595,33 @@ at a negative PC clears bit 63. User mode faults on bit 63."
   (setf (vm-asleep vm) nil)
   vm)
 
+(defun identity-mmio-p (original phys ok)
+  "A negative address whose bit-63-cleared form is at least 2^48 is I/O.
+Data_Segment, Pool_Segment, and Stack_Segment stay in the page hash:
+those nonnegative addresses are larger than 2^48 and are not devices."
+  (and ok
+       (logbitp 63 (u64 original))
+       (>= phys (ash 1 48))))
+
 (defun %byte (vm addr &optional (value nil write-p))
-  (multiple-value-bind (addr ok) (resolve-identity-address vm addr)
-    (unless ok
-      (return-from %byte 0))
-    (cond (write-p
-           (%chunk-byte vm addr value)
-           (when (vm-caches vm)
-             (cache-note-store-byte vm addr value))
-           value)
-          ((vm-caches vm)
-           (multiple-value-bind (byte hit) (cache-note-load-byte vm addr)
-             (if hit byte (%chunk-byte vm addr))))
-          (t (%chunk-byte vm addr)))))
+  (let ((original (u64 addr)))
+    (multiple-value-bind (addr ok) (resolve-identity-address vm original)
+      (unless ok
+        (return-from %byte 0))
+      (when (identity-mmio-p original addr ok)
+        (return-from %byte
+          (if write-p
+              (progn (call-mmio vm addr 1 (u8 value) t) value)
+              (logand (u64 (call-mmio vm addr 1 nil nil)) #xff))))
+      (cond (write-p
+             (%chunk-byte vm addr value)
+             (when (vm-caches vm)
+               (cache-note-store-byte vm addr value))
+             value)
+            ((vm-caches vm)
+             (multiple-value-bind (byte hit) (cache-note-load-byte vm addr)
+               (if hit byte (%chunk-byte vm addr))))
+            (t (%chunk-byte vm addr))))))
 
 (defun %guest-access (vm addr nbytes value write-p internal physical)
   (cond (physical
@@ -551,15 +662,31 @@ at a negative PC clears bit 63. User mode faults on bit 63."
     v))
 
 (defun %ref-sized (vm addr nbytes)
-  (let ((acc 0))
-    (dotimes (i nbytes acc)
-      (setf acc (logior (ash acc 8) (%byte vm (+ addr i)))))))
+  "One identity load. A negative address at or above physical 2^48 is a
+single MMIO read, so an octa is not eight byte reads."
+  (let ((original (u64 addr)))
+    (multiple-value-bind (phys ok) (resolve-identity-address vm original)
+      (when (identity-mmio-p original phys ok)
+        (return-from %ref-sized
+          (logand (u64 (call-mmio vm phys nbytes nil nil))
+                  (1- (ash 1 (* 8 nbytes)))))))
+    (let ((acc 0))
+      (dotimes (i nbytes acc)
+        (setf acc (logior (ash acc 8) (%byte vm (+ original i))))))))
 
 (defun %set-sized (vm addr nbytes value)
-  (let ((value (logand value (1- (ash 1 (* 8 nbytes))))))
+  "One identity store. A negative address at or above physical 2^48 is a
+single MMIO write. The low byte of an octa store is the IPI core id, not
+eight separate writes."
+  (let ((original (u64 addr))
+        (value (logand value (1- (ash 1 (* 8 nbytes))))))
+    (multiple-value-bind (phys ok) (resolve-identity-address vm original)
+      (when (identity-mmio-p original phys ok)
+        (call-mmio vm phys nbytes value t)
+        (return-from %set-sized value)))
     (loop for i from 0 below nbytes
           for shift from (* 8 (1- nbytes)) downto 0 by 8
-          do (%byte vm (+ addr i) (ldb (byte 8 shift) value)))
+          do (%byte vm (+ original i) (ldb (byte 8 shift) value)))
     value))
 
 (defun mem-ref-u16 (vm addr &key internal physical)

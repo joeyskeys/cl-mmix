@@ -1,6 +1,6 @@
 # cl-mmix vs a full MMIX machine
 
-This document is the gap between the sources described in [IMPLEMENTATION.md](IMPLEMENTATION.md) (ASDF system `cl-mmix` 0.16.0) and a complete MMIX. It replaces the older write-up, which compared an early MVP (flat registers, about 64 opcodes, a private putchar `TRAP`) with a user-mode practice target. That user-mode target is what the tree implements now. The paragraphs below describe what is still missing after it.
+This document is the gap between the sources described in [IMPLEMENTATION.md](IMPLEMENTATION.md) (ASDF system `cl-mmix` 0.17.0) and a complete MMIX. It replaces the older write-up, which compared an early MVP (flat registers, about 64 opcodes, a private putchar `TRAP`) with a user-mode practice target. That user-mode target is what the tree implements now. The paragraphs below describe what is still missing after it.
 
 The work that closes each gap is a separate plan under [plans/](plans/00-roadmap.md).
 
@@ -31,7 +31,7 @@ Where this file and the code disagree, the code wins for “implemented” and `
 
 ## Baseline already in the tree
 
-These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (173 checks) and must keep `make-vm` usable as a user-mode interpreter.
+These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (182 checks) and must keep `make-vm` usable as a user-mode interpreter.
 
 - All 256 opcode bytes are named in `src/decode.lisp`.
 - Integer arithmetic, shifts, compares, bitwise ops, wyde immediates, conditional sets, branches (including backward and probable forms), `JMP`/`GETA`/`GO`/`PUSHJ`/`PUSHGO`/`POP`, tetra and immediate loads and stores, `LDHT`/`STHT`/`STCO`/`CSWAP`/`MOR`/`MXOR`.
@@ -59,8 +59,8 @@ These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (
 | [08](plans/08-timing-costs.md) | μ and υ | Implemented. `vm-oops` and `vm-mem-cost` follow §50, including mispredicted branches. `vm-cycles`, `vm-mems`, and `rI` keep their old meanings. `:pipeline t` adds `vm-pipe-cycles` | The §50 totals stay available beside the pipe |
 | [09](plans/09-mmixal.md) | MMIXAL | Implemented. `.mms` text through `assemble-mms` / `load-mms` / `write-mmo`: `LOC`, `IS`, `GREG`, `PREFIX`, `LOCAL`, data, expressions, local labels, `BSPEC` | The `mmixal` macro language |
 | [10](plans/10-simulator-session.md) | MMIX-SIM session | Implemented. `:argv` enters through `UNSAVE` with `$0` = argc, `$1` = argv, and `rL` = 2. Text modes translate newlines. `sim-command` reads one line. `:profile t` counts retired tetras. `s` prints `pipe=` | Same session |
-| [11](plans/11-pipeline.md) | Pipeline | Implemented behind `:pipeline`. F–D–X–M–W, X scoreboard, M/W bypass into D, probable branches predict taken. Default `make-vm` still retires one instruction before the next fetch | No reorder buffer, no speculative store, no second core |
-| [12](plans/12-multicore.md) | Several processors | One `vm` struct | Shared physical memory, atomic `CSWAP`, `SYNC` fences, per-core `rQ` |
+| [11](plans/11-pipeline.md) | Pipeline | Implemented behind `:pipeline`. F–D–X–M–W, X scoreboard, M/W bypass into D, probable branches predict taken. Default `make-vm` still retires one instruction before the next fetch | No reorder buffer and no speculative store. Each core can carry this pipe |
+| [12](plans/12-multicore.md) | Several processors | Implemented. `make-machine` shares physical memory. `CSWAP` locks the octa. `SYNC` 5 and 7 are per core. IPI is `rQ` bit 1 at physical `2^48+8` | No silent cache invalidation and no operating system |
 
 Dependency order is in the [roadmap](plans/00-roadmap.md). Plans 01, 02, 03, 08, and 09 can start from today’s tree. Plans 05–07, 11, and 12 stack.
 
@@ -192,20 +192,19 @@ On a machine with a write buffer or a write-back data cache:
 
 Prediction in that table: ordinary branches predict not taken, probable branches (`PB*`) predict taken. `charge` applies that table when an instruction retires, on the interpreter and on the pipe. `LDSF`/`STSF` cost 4υ and 1μ. `PUSHGO` costs 3υ and no μ. `vm-cycles` and `vm-mems` stay beside `vm-oops` and `vm-mem-cost`. `:pipeline t` counts `vm-pipe-cycles` as well, and `s` prints that count.
 
-`src/pipe.lisp` is one processor of stages F, D, X, M, and W. X uses the §50 unit times: add 1, multiply 10, divide 60, float add 4, float multiply 4, float divide and square root 40. `:cache-config` can set `add`, `multiply`, `divide`, `fadd`, `fmul`, and `fdiv` lower. A memory operation spends `accesstime` in M when caches are on and one cycle otherwise. A destination is busy while its writer occupies X. M and W forward to D in that same cycle, so a load-use costs one extra pipeline cycle. Stores commit in `execute` at W, when the instruction is oldest. The pipe does not model a second core, a reorder buffer, or a different delay for a cache hit and a cache miss. Plan 12 duplicates this pipe per core.
+`src/pipe.lisp` is one processor of stages F, D, X, M, and W. X uses the §50 unit times: add 1, multiply 10, divide 60, float add 4, float multiply 4, float divide and square root 40. `:cache-config` can set `add`, `multiply`, `divide`, `fadd`, `fmul`, and `fdiv` lower. A memory operation spends `accesstime` in M when caches are on and one cycle otherwise. A destination is busy while its writer occupies X. M and W forward to D in that same cycle, so a load-use costs one extra pipeline cycle. Stores commit in `execute` at W, when the instruction is oldest. Each core of a machine carries its own copy of this pipe. The pipe does not model a reorder buffer or a different delay for a cache hit and a cache miss.
 
 ## Several processors (§31, plan 12)
 
-The architecture’s multiprocessor rules are `CSWAP` and `SYNC`. There is no specified core-count register, no specified inter-processor interrupt opcode, and no specified cache-coherence protocol. MMMIX states that multiprocessing is outside that simulator.
+Landed. The architecture’s multiprocessor rules are `CSWAP` and `SYNC`. There is no specified core-count register, no specified inter-processor interrupt opcode, and no specified cache-coherence protocol. MMMIX states that multiprocessing is outside that simulator. The choices below are this repository’s.
 
-The full machine in this repository is still a multiprocessor, with these implementation choices written down in plan 12 so two cores have one meaning:
+`make-machine` returns a machine whose cores share one physical page hash, one page budget, one MMIO hook, and one `CSWAP` lock table. `make-vm` is that machine with one core; the caller still sees a `vm`. Each core has its own general registers, special registers, `PC`, `rV`, translation caches, data cache, instruction cache, pipeline, `rQ`, and `rK`.
 
-- Each core has its own general registers, special registers, `PC`, and pipeline.
-- Physical memory is shared. Virtual memory is per core, because each core has its own `rV`.
-- `CSWAP` locks the target octa for the duration of the compare and the possible store.
-- `SYNC` XYZ = 0…3 is a fence on that core’s accesses to the shared memory. XYZ = 5…7 also maintain that core’s caches. A fence does not stall another core except through the shared-memory order the fence creates.
-- One implementation-defined machine bit in `rQ` is the inter-processor interrupt. A core raises another core’s bit through a memory-mapped register at a physical address `≥ 2^48`. Device bits in the I/O fields of `rQ` stay available for a later device model.
-- The functional scheduler runs cores by taking one retired instruction from each runnable core in turn. Lockstep pipelines are not required.
+`run-machine` retires one instruction from core 0, then core 1, and so on. A halted core is skipped. An asleep core is skipped while `rQ` is zero. `:max-cycles` is the sum of `vm-cycles` deltas. When a core has a pipe, `step-core` advances it until the next instruction retires. The functional scheduler does not require `:pipeline t`.
+
+`CSWAP` holds the target physical octa across the compare and the store. `SYNC` XYZ 0–3 records a fence tag on the core that executes it. XYZ 5 writes that core’s dirty lines back. XYZ 7 drops that core’s caches and leaves another core’s dirty line in place. A store that sits only in a write-back cache is invisible to another core until `SYNC` 5, `SYNCD`, or `STUNC`. There is no silent invalidation.
+
+Physical `#x1000000000008` (`2^48 + 8`) is the inter-processor interrupt register. A store whose low byte is core id `j` sets bit 1 of that core’s `rQ`. A store of 255 wakes every core and sets no `rQ` bit. Delivery is the plan 05 dynamic trap. Bit 6 of `rQ` remains the interval timer. Bit 0 remains the power-failure bit.
 
 ## Software around the machine
 

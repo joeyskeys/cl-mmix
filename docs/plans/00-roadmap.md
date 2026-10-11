@@ -17,7 +17,7 @@ The gap catalog is [../TAOCP-GAP-ANALYSIS.md](../TAOCP-GAP-ANALYSIS.md). The beh
 | 9 | [06 Virtual memory](06-virtual-memory.md) | Landed. `:virtual-memory t` walks `rV`; default `make-vm` stays an identity map | Line caches landed in plan 07 |
 | 10 | [07 Caches and SYNC](07-cache-and-sync.md) | Landed. `:caches t` writebacks through `SYNCD` and `SYNC`; the default VM still stores straight to memory | M uses `accesstime` when the pipe and caches are on |
 | 11 | [11 Pipeline](11-pipeline.md) | Landed. `:pipeline t` overlaps F–D–X–M–W; default `make-vm` still retires one instruction at a time | Plan 12 can give each core its own pipe |
-| 12 | [12 Multi-core](12-multicore.md) | Plans 05, 06, and 07; each core can carry the plan 11 pipe | Shared memory, atomic `CSWAP`, cross-core `SYNC` |
+| 12 | [12 Multi-core](12-multicore.md) | Landed. Shared physical memory, atomic `CSWAP`, per-core `SYNC` and `rQ` | This is the last plan |
 
 Plans 08 and 09 do not wait on plan 01. They sit where they do so the integer machine gains a cost line and an assembler before the kernel work begins.
 
@@ -31,4 +31,4 @@ Plans 08 and 09 do not wait on plan 01. They sit where they do so the integer ma
 
 ## Done when
 
-The last plan’s acceptance run is: two cores, each with its own `rV`, sharing a physical octa; `CSWAP` from both; `SYNC 3` between a store on one core and a load on the other; a floating-point add that trips and `RESUME`s; a `.mms` program that `PUSHJ`s, `Fputs`s through the kernel ROM, and halts with the MMIX-SIM exit code. The functional one-instruction stepper still runs the original demos.
+Landed. The last plan’s acceptance run is: two cores, each with its own `rV`, sharing a physical octa; `CSWAP` from both; `SYNC 3` between a store on one core and a load on the other; a floating-point add that trips and `RESUME`s; a `.mms` program that `PUSHJ`s, `Fputs`s through the kernel ROM, and halts with the MMIX-SIM exit code. The functional one-instruction stepper still runs the original demos.

@@ -11,14 +11,19 @@
                   (cond ((< i l) "local")
                         ((< i g) "marginal")
                         (t "global"))))))
-    (format stream "PC=#x~X  cycles=~D  mems=~D  halted=~A~%"
-            (vm-pc vm) (vm-cycles vm) (vm-mems vm) (vm-halted vm))
+    (format stream "PC=#x~X  cycles=~D  mems=~D  oops=~D  mem-cost=~D  halted=~A~%"
+            (vm-pc vm) (vm-cycles vm) (vm-mems vm)
+            (vm-oops vm) (vm-mem-cost vm) (vm-halted vm))
     (format stream "rL=~D  rG=~D  rJ=#x~X  rA=#x~X  rR=#x~X  rH=#x~X~%"
             l g
             (special-reg vm +r-j+)
             (special-reg vm +r-a+)
             (special-reg vm +r-r+)
             (special-reg vm +r-h+))
+    (dolist (pair `(("rN" ,+r-n+) ("rI" ,+r-i+) ("rU" ,+r-u+)))
+      (let ((v (special-reg vm (second pair))))
+        (unless (zerop v)
+          (format stream "~A=#x~X~%" (first pair) v))))
     (when (vm-fault vm)
       (format stream "fault: ~A~%" (vm-fault vm)))
     (when (vm-break vm)

@@ -103,8 +103,9 @@
                  (reg vm 1)
                  (logand (special-reg vm +r-a+) #xffff)
                  (special-reg vm +r-w+)
+                 (logbitp 63 (special-reg vm +r-x+))
                  (vm-fault vm)))
-         (list 80 #x7ff0000000000000 #x809 #x204 nil))
+         (list 80 #x7ff0000000000000 #x801 #x204 t nil))
 
   (check fadd-overflow-o-beats-x
          (let ((vm (fp-run '((fadd $1 $2 $3))
@@ -112,8 +113,8 @@
                            :regs '((2 . #x7fefffffffffffff)
                                    (3 . #x7fefffffffffffff))
                            :specials '((21 . #x900)))))
-           (vm-pc vm))
-         80)
+           (list (vm-pc vm) (logand (special-reg vm +r-a+) #xffff)))
+         (list 80 #x901))
 
   (check fdiv-by-zero
          (let ((pos (fp-run '((fdiv $1 $2 $3))
@@ -237,7 +238,7 @@
                            :regs '((2 . 0) (3 . 1))
                            :specials '((21 . #x400)))))
            (list (vm-pc vm) (reg vm 1) (logand (special-reg vm +r-a+) #xffff)))
-         (list 96 1 #x404))
+         (list 96 1 #x400))
 
   (check illegal-rounding-mode
          (let ((vm (make-vm)))

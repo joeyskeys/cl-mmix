@@ -2,7 +2,7 @@
 
 A user-mode **MMIX** virtual machine in portable Common Lisp (tested on SBCL).
 
-It runs educational MMIXAL: the integer and floating-point instruction sets, the register stack, the four address segments, MMIX-SIM traps, and `.mmo` object files. It is not an MMIXware replacement: there is no pipeline and no virtual memory.
+It runs educational MMIXAL: the integer and floating-point instruction sets, the register stack, the four address segments, MMIX-SIM traps, and `.mmo` object files. It is not an MMIXware replacement: there is no pipeline. Page tables run when `make-vm` is called with `:kernel t` and `:virtual-memory t`. The default VM still uses a flat map of the four segments, and stores go straight to memory. `:caches t` adds write-back instruction and data caches.
 
 What the code actually does, opcode by opcode, is written in [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md). The distance from that code to a full MMIX machine is [docs/TAOCP-GAP-ANALYSIS.md](docs/TAOCP-GAP-ANALYSIS.md), and the sequence of plans is [docs/plans/00-roadmap.md](docs/plans/00-roadmap.md).
 
@@ -16,10 +16,10 @@ What the code actually does, opcode by opcode, is written in [docs/IMPLEMENTATIO
 - Loads and stores of byte, wyde, tetra, and octa, plus the immediate forms. Addresses are aligned by masking low bits. Signed stores that do not fit set `V` and still write the low bytes.
 - Bitwise operations: `AND`/`OR`/`XOR` and their complements, `BDIF`/`WDIF`/`TDIF`/`ODIF`, `MUX`, `SADD`, `MOR`/`MXOR`, wyde immediates, `LDHT`/`STHT`/`STCO`, and `CSWAP`.
 - `CS*`/`ZS*`, branches (`BN`…`PBV` and the backward opcodes), `JMP`/`JMPB`, `GETA`/`GETAB`.
-- `TRIP` and `RESUME` with `XYZ` = 0. Arithmetic trips only when the matching `rA` enable bit is set.
+- `TRIP` and `RESUME 0`. A trip saves `$255` in `rB`, loads `$255` from `rJ`, and sets bit 63 of `rX`. An enabled arithmetic exception trips with that event bit left clear. `RESUME 0` returns to `rW` or inserts the tetra in `rX` under ropcodes 0–2.
 - Four segments, sparse 4096-byte pages, untouched reads are 0. `:memory-size` is a page budget (at least one page), not a flat array length.
 - MMIX-SIM `TRAP` services: Halt, Fopen, Fclose, Fread, Fwrite, Fgets, Fgetws, Fputs, Fputws, Fseek, Ftell. Handles 0–2 are StdIn, StdOut, and StdErr.
-- S-expression assembler that emits real forward and backward opcodes, and a `.mmo` loader (content is XOR-ed in, as in MMIXware).
+- S-expression assembler that emits real forward and backward opcodes, a `.mms` subset (`assemble-mms`, `load-mms`, `write-mmo`), and a `.mmo` loader (content is XOR-ed in, as in MMIXware).
 - Breakpoints on fetch, read, and write. `step-vm`, `run-vm`, `continue-vm`.
 
 ## Layout
@@ -27,7 +27,7 @@ What the code actually does, opcode by opcode, is written in [docs/IMPLEMENTATIO
 ```
 cl-mmix/
   cl-mmix.asd
-  src/          package, util, machine, decode, float/, trap, ops, asm, mmo, api
+  src/          package, util, machine, decode, float/, trap, ops, asm, mmo, mmixal, api
   tests/        assert-style tests (no FiveAM), including tests/float.lisp
   scripts/run-demo.lisp
   docs/         implementation guide, full-machine gap analysis, and plans/
@@ -92,7 +92,7 @@ sbcl --load scripts/run-demo.lisp
 | Pool | `#x4000000000000000` |
 | Stack | `#x6000000000000000` |
 
-Bit 63 is a kernel address: the instruction stops, `vm-fault` is set, and the machine halts. Pages are allocated on the first write. `(mem-size vm)` is the budget in bytes, rounded up to a page. `(vm-memory vm)` is the page table, a hash table of 4096-byte vectors, not a flat octet vector.
+On the default VM, bit 63 is a kernel address: the instruction stops, `vm-fault` is set, and the machine halts. `:kernel t` maps that address from kernel code by clearing bit 63, and a user instruction that names one sets `n` instead of halting. `:virtual-memory t` requires `:kernel t` and translates a nonnegative address through `rV`. Pages are allocated on the first write. `(mem-size vm)` is the budget in bytes, rounded up to a 4096-byte chunk. `(vm-memory vm)` is that physical hash, a table of 4096-byte vectors, not a flat octet vector.
 
 The hidden register stack is a Lisp vector. `rO` and `rS` stay consistent with `Stack_Segment + 8*tau`, and each push is also written into the stack segment.
 
@@ -100,11 +100,11 @@ The hidden register stack is a Lisp vector. `rO` and `rS` stay consistent with `
 
 `$0` … `$(rL−1)` are local, `$rL` … `$(rG−1)` are marginal, and `$rG` … `$255` are global. `PUT rL` ignores a new value that is not smaller. `PUT rG` clamps at 32; if the new `rG` is below `rL`, `rL` drops to match. Raising `rG` zeros registers that become marginal. Lowering `rG` zeros former marginals that become global and keeps former locals that become global.
 
-`rA` event bits, from bit 7 down to bit 0, are `DVWIOUZX`. Enables are bits 15–8 and default to 0, so an overflow records `V` without tripping. Trip vectors are D=16, V=32, W=48, I=64, O=80, U=96, Z=112, X=128. `TRIP` itself enters at 0.
+`rA` event bits, from bit 7 down to bit 0, are `DVWIOUZX`. Enables are bits 15–8 and default to 0, so an overflow records `V` without tripping. An enabled exception trips and leaves that event bit clear. Trip vectors are D=16, V=32, W=48, I=64, O=80, U=96, Z=112, X=128. `TRIP` itself enters at 0.
 
 ## TRAP (MMIX-SIM)
 
-`$255` is the argument or the result. `Y` selects the operation:
+`$255` is the argument or the result. `Y` selects the operation. The default VM performs the call in Lisp. `(make-vm :kernel t)` enters a ROM at `rT` and returns through `RESUME 1`, with the same `$255` result.
 
 | Y | Operation |
 |---|-----------|
@@ -142,6 +142,19 @@ Modes: 0 TextRead, 1 TextWrite, 2 BinaryRead, 3 BinaryWrite, 4 BinaryReadWrite. 
 
 Each `:org` is its own segment. `PC` becomes the first origin, so put code before data. Registers are `$3` or `3`. Branch, `JMP`, `GETA`, and `PUSHJ` targets are labels and must be 4-byte aligned relative to the instruction. Byte immediates are unsigned. `SET $X,$Y` is `ORI`. `NEG`/`NEGU` take an unsigned byte as `Y`.
 
+`assemble-mms` and `load-mms` read MMIXAL text. `GREG` counts down from 255, `1H`/`1F`/`1B` are local labels, and `SET` of a constant is one `SETL`. `write-mmo` saves that image for `load-mmo`. The macro language is not implemented.
+
+```mms
+        LOC     #100
+        SETL    $1,10
+        SETL    $3,1
+1H      BZ      $1,1F
+        MUL     $3,$3,$1
+        SUB     $1,$1,1
+        JMP     1B
+1H      TRAP    0,Halt,0
+```
+
 `(load-mmo vm path-or-octet-vector)` loads an `.mmo` file. `PC` is the absolute symbol `Main` or `:Main` when one is present, otherwise the first tetra in the text segment.
 
 ## Debugger
@@ -157,14 +170,16 @@ Each `:org` is its own segment. `PC` becomes the first origin, so put code befor
 (disassemble-at vm)
 ```
 
-`run-vm` signals a Lisp error when `:max-cycles` is exhausted without a halt or a breakpoint. A `mmix-fault` (kernel address, page budget, unimplemented opcode) is caught by `step-vm`: `vm-fault` holds the reason and the machine halts.
+`run-vm` signals a Lisp error when `:max-cycles` is exhausted without a halt, a breakpoint, or `SYNC` 4. A `mmix-fault` (kernel address, page budget, unimplemented opcode) is caught by `step-vm`: `vm-fault` holds the reason and the machine halts.
 
 ## API
 
 | Function | Role |
 |----------|------|
-| `make-vm` | `:memory-size` page budget, `:pc`, `:input`, `:legacy-putchar` |
-| `assemble` / `assemble-into` / `load-program` / `load-mmo` | Build and load |
+| `make-vm` | `:memory-size` page budget, `:pc`, `:input`, `:legacy-putchar`, `:kernel`, `:virtual-memory`, `:caches`, `:cache-config` |
+| `wake-core` | Leave the sleep entered by `SYNC` 4 |
+| `assemble` / `assemble-into` / `load-program` / `load-mmo` | Build and load s-expressions or `.mmo` |
+| `assemble-mms` / `load-mms` / `write-mmo` | Assemble `.mms` text and write `.mmo` |
 | `step-vm` / `run-vm` / `continue-vm` | Execute |
 | `reg` / `set-reg` / `special-reg` / `set-special` | Register window and raw specials |
 | `mem-ref-u*` / `mem-set-u*` | Big-endian memory |
@@ -182,12 +197,11 @@ sbcl --script tests/run-tests.lisp
 
 [docs/TAOCP-GAP-ANALYSIS.md](docs/TAOCP-GAP-ANALYSIS.md) is the gap between this tree and a full machine (kernel, remaining opcodes, virtual memory, pipeline, and multi-core). [docs/plans/00-roadmap.md](docs/plans/00-roadmap.md) is the order of work. The largest holes:
 
-- `SAVE`/`UNSAVE` halt with "SAVE/UNSAVE is not implemented".
-- An enabled floating-point exception trips with today's entry: the event bit stays set, and `rX` is the raw instruction.
-- No `rV` page tables, no dynamic traps, no pipeline, no `υ`/`μ` counts beyond a simple `mems` counter.
-- `RESUME` accepts only `XYZ` = 0 (`PC ← rW`).
-- `SWYM` does not halt. `PRE*`/`SYNC*`/`SYNCD`/`SYNCID` are no-ops. `LDUNC`/`STUNC` are ordinary octa accesses. `LDVTS` returns 0.
+- No pipeline. §50 μ and υ are `vm-mem-cost` and `vm-oops`. `vm-cycles` still counts one per `step-vm` that passes an execute breakpoint, and `vm-mems` still counts load and store operations. Dynamic traps and `RESUME 1` run when `make-vm` is called with `:kernel t`. Page tables run with `:virtual-memory t` as well. The default VM still has neither, and bit 63 of an address still faults there. `LDVTS` returns 0 on that default VM.
+- `RESUME 1` (`Z ≠ 0`) on the default VM is still the unimplemented path. `RESUME 0` inserts ropcodes 0–2.
+- `SWYM` does not halt. With caches off, `PRE*`/`SYNCD`/`SYNCID` change nothing and `LDUNC`/`STUNC` are ordinary octa accesses. `:caches t` writebacks dirty lines and records `SYNC` 0–3 as a fence tag. Hit and miss delays are still absent. `SYNC` 6 drops the translation caches when virtual memory is on.
 - `Fopen` text and binary modes are not newline-translated.
+- MMIXAL macros are not implemented. `LOC`, `IS`, `GREG`, `PREFIX`, `LOCAL`, data, expressions, and ordinary instructions assemble from `.mms` text.
 
 ## License
 

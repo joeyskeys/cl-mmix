@@ -13,6 +13,8 @@
    #:vm-output
    #:vm-error-output
    #:vm-mems
+   #:vm-oops
+   #:vm-mem-cost
    #:vm-fault
    #:vm-exit-code
    #:vm-break
@@ -36,6 +38,7 @@
    #:run-vm
    #:continue-vm
    #:reset-vm
+   #:wake-core
    #:breakpoint
    #:clear-breakpoints
    ;; Assembler / loader
@@ -43,6 +46,14 @@
    #:load-program
    #:assemble-into
    #:load-mmo
+   #:assemble-mms
+   #:load-mms
+   #:write-mmo
+   #:mmixal-image
+   #:mmixal-image-rg
+   #:mmixal-image-regs
+   #:mmixal-image-values
+   #:mmixal-image-specs
    ;; Inspection
    #:disassemble-at
    #:dump-registers

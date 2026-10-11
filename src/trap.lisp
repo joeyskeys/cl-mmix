@@ -263,37 +263,51 @@
       (t (let ((pos (file-position (fio-stream fio))))
            (ret255 vm (if pos pos -1)))))))
 
-(defun exec-trap (vm inst)
-  "Perform one TRAP. Returns :STOP when the machine halts."
+(defun service-trap (vm x y z)
+  "MMIX-SIM dispatch for one TRAP. Returns :STOP when the machine halts."
+  (cond
+    ((and (zerop x) (zerop y) (zerop z))
+     (halt-vm vm)
+     :stop)
+    ((and (zerop x) (zerop y) (= z 1))
+     (setf (vm-fault vm) "TRAP 0,0,1 (no kernel to service the trip)")
+     (halt-vm vm)
+     :stop)
+    ((zerop y)
+     (halt-vm vm)
+     :stop)
+    (t
+     (case y
+       (1 (sim-fopen vm z))
+       (2 (sim-fclose vm z))
+       (3 (sim-fread vm z))
+       (4 (sim-fgets vm z))
+       (5 (sim-fgetws vm z))
+       (6 (sim-fwrite vm z))
+       (7 (sim-fputs vm z))
+       (8 (sim-fputws vm z))
+       (9 (sim-fseek vm z))
+       (10 (sim-ftell vm z))
+       (t (setf (vm-fault vm) (format nil "unsupported TRAP ~D,~D,~D" x y z))
+          (halt-vm vm)
+          (return-from service-trap :stop)))
+     nil)))
+
+;;; Defined in src/kernel.lisp. Returns :JUMP after the forced-trap image is written.
+(declaim (ftype (function (t t) t) enter-forced-trap))
+
+(defun exec-trap-user (vm inst)
+  "TRAP as a Lisp syscall. Does not write rT, rK, or the bootstrap registers."
   (let ((x (inst-x inst))
         (y (inst-y inst))
         (z (inst-z inst)))
-    (cond
-      ((and (zerop x) (zerop y) (zerop z))
-       (halt-vm vm)
-       :stop)
-      ((and (zerop x) (zerop y) (= z 1))
-       (setf (vm-fault vm) "TRAP 0,0,1 (no kernel to service the trip)")
-       (halt-vm vm)
-       :stop)
-      ((and (vm-legacy-putchar vm) (zerop x) (= y 1))
-       (legacy-putchar vm z))
-      ((zerop y)
-       (halt-vm vm)
-       :stop)
-      (t
-       (case y
-         (1 (sim-fopen vm z))
-         (2 (sim-fclose vm z))
-         (3 (sim-fread vm z))
-         (4 (sim-fgets vm z))
-         (5 (sim-fgetws vm z))
-         (6 (sim-fwrite vm z))
-         (7 (sim-fputs vm z))
-         (8 (sim-fputws vm z))
-         (9 (sim-fseek vm z))
-         (10 (sim-ftell vm z))
-         (t (setf (vm-fault vm) (format nil "unsupported TRAP ~D,~D,~D" x y z))
-            (halt-vm vm)
-            (return-from exec-trap :stop)))
-       nil))))
+    (if (and (vm-legacy-putchar vm) (zerop x) (= y 1))
+        (legacy-putchar vm z)
+        (service-trap vm x y z))))
+
+(defun exec-trap (vm inst)
+  "Perform one TRAP. A kernel VM enters rT. User mode stays in Lisp.
+Returns :STOP when the machine halts, :JUMP when control goes to the ROM."
+  (if (vm-kernel vm)
+      (enter-forced-trap vm inst)
+      (exec-trap-user vm inst)))

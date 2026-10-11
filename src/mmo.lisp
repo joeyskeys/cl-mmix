@@ -250,6 +250,8 @@
       (setf (vm-pc vm) (u64 (or main text-entry 0))
             (vm-halted vm) nil
             (vm-cycles vm) 0
+            (vm-oops vm) 0
+            (vm-mem-cost vm) 0
             (vm-fault vm) nil))
     (sync-stack vm)
     vm))

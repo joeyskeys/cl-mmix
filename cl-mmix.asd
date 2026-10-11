@@ -3,7 +3,7 @@
   :description "User-mode MMIX virtual machine for educational MMIXAL programs"
   :author "cl-mmix"
   :license "GPL-3.0"
-  :version "0.10.0"
+  :version "0.14.0"
   :depends-on ()
   :serial t
   :components ((:module "src"
@@ -11,6 +11,7 @@
                 (                 (:file "package")
                  (:file "util")
                  (:file "machine")
+                 (:file "cache")
                  (:file "decode")
                  ;; Later plans add a sibling directory here instead of growing ops.lisp.
                  (:module "float"
@@ -22,7 +23,11 @@
                  (:file "trap")
                  (:file "ops")
                  (:file "asm")
+                 ;; After the assembler: the trap ROM is an assembled tetra image.
+                 (:file "kernel")
+                 (:file "translate")
                  (:file "mmo")
+                 (:file "mmixal")
                  (:file "api"))))
   :in-order-to ((test-op (test-op "cl-mmix/tests"))))
 

@@ -1,8 +1,8 @@
 # Current implementation
 
-This document describes this tree (ASDF system `cl-mmix`, version 0.10.0). It is what the sources do today. The distance from this tree to a full machine — kernel mode, the remaining opcodes, virtual memory, a pipeline, and shared-memory multi-core — is [TAOCP-GAP-ANALYSIS.md](TAOCP-GAP-ANALYSIS.md). The order of work is [plans/00-roadmap.md](plans/00-roadmap.md).
+This document describes this tree (ASDF system `cl-mmix`, version 0.14.0). It is what the sources do today. The distance from this tree to a full machine — kernel mode, the remaining opcodes, virtual memory, a pipeline, and shared-memory multi-core — is [TAOCP-GAP-ANALYSIS.md](TAOCP-GAP-ANALYSIS.md). The order of work is [plans/00-roadmap.md](plans/00-roadmap.md).
 
-The VM is a **user-mode functional interpreter** for educational MMIXAL. Every one of the 256 opcode bytes has a name in the decoder. The integer, bitwise, floating-point, load/store, branch, wyde, register-stack, and MMIX-SIM `TRAP` instructions are executed. `SAVE`/`UNSAVE` are recognized and stop the machine with `vm-fault`. There is no pipeline, no page-table `rV`, and no dynamic trap entry into a kernel.
+The VM is a **user-mode functional interpreter** for educational MMIXAL. Every one of the 256 opcode bytes has a name in the decoder. The integer, bitwise, floating-point, load/store, branch, wyde, register-stack, `SAVE`/`UNSAVE`, and MMIX-SIM `TRAP` instructions are executed. There is no pipeline. `:kernel t` adds forced traps, dynamic traps, and `RESUME 1`. `:virtual-memory t` requires `:kernel` and translates nonnegative addresses through `rV`. `:caches t` adds a write-back instruction cache and data cache. The default `make-vm` keeps the four segments as an identity map, faults on bit 63, returns 0 from `LDVTS`, and writes each store straight into memory.
 
 ## Source map
 
@@ -12,13 +12,17 @@ ASDF loads `src/` serially, in this order:
 |------|----------------|
 | `package.lisp` | Packages `cl-mmix` and `cl-mmix/tests`, and the public exports |
 | `util.lisp` | 64-bit wrap, signed views, overflow, floor division, shifts, `BDIF` slices, `MOR`/`MXOR` |
-| `machine.lisp` | VM struct, special registers, the `rL`/`rG` window, sparse memory, the register stack, `PUT` rules, breakpoints, trips |
+| `machine.lisp` | VM struct, special registers, the `rL`/`rG` window, sparse memory, the register stack, `SAVE`/`UNSAVE`, `PUT` rules, breakpoints, trips |
+| `cache.lisp` | Instruction and data caches, `SYNCD`/`SYNCID`/`PRE*`, and the `SYNC` 0–7 operations. `:caches t` builds the caches; the default VM leaves the slots empty |
 | `decode.lisp` | The 256-opcode name table, encode/decode, fetch, disassembly |
 | `float/` | IEEE binary64 and binary32. `octa.lisp` holds the bit helpers, `pack.lisp` packs and unpacks, `arith.lisp` is the operations, `exec.lisp` dispatches opcodes and commits `rA` |
 | `trap.lisp` | MMIX-SIM `TRAP` services and the legacy putchar switch |
 | `ops.lisp` | Instruction execution and `step-vm` / `run-vm` / `continue-vm`. Floating-point opcodes call into `float/` |
 | `asm.lisp` | S-expression assembler |
+| `kernel.lisp` | Trap ROM, forced and dynamic traps, `RESUME 1`. Loaded after the assembler because the ROM is an assembled image |
+| `translate.lisp` | `rV` page-table walk, translation caches, `LDVTS`, and the `vm-mmio` path. Loaded after the kernel so a software miss can force a trap |
 | `mmo.lisp` | `.mmo` loader |
+| `mmixal.lisp` | `.mms` assembler. Shares `encode-form` with `asm.lisp` and can write `.mmo` |
 | `api.lisp` | `dump-registers`, `dump-memory`, and the demos |
 
 `tests/tests.lisp` is a small `check` runner (no FiveAM, no Quicklisp). `scripts/run-demo.lisp` loads the system and prints the demos.
@@ -66,16 +70,16 @@ Status in the table means what `execute` does today.
 | `#x90`–`#x91` | `LDSF`/`LDSFI` | Executed. Aligned tetra load, widened from binary32 to binary64. Increments `vm-mems`. |
 | `#x92`–`#x93` | `LDHT`/`LDHTI` | Executed. The aligned tetra is shifted left by 32. |
 | `#x94`–`#x95` | `CSWAP`/`CSWAPI` | Executed. Compare the octa at the aligned address with `rP`. On a match, store `$X` and set `$X ← 1`. Otherwise set `rP` from memory and `$X ← 0`. |
-| `#x96`–`#x97` | `LDUNC`/`LDUNCI` | Executed as `LDOU`. There is no cache. |
-| `#x98`–`#x99` | `LDVTS`/`LDVTSI` | Executed as "return 0". There are no page tables. |
-| `#x9A`–`#x9D` | `PRELD`/`PRELDI` `PREGO`/`PREGOI` | No-ops. |
+| `#x96`–`#x97` | `LDUNC`/`LDUNCI` | With caches off, the same as `LDOU`. With `:caches t`, reads memory and does not allocate a line, so a dirty line is not what `$X` receives. |
+| `#x98`–`#x99` | `LDVTS`/`LDVTSI` | On the default VM, `$X ← 0`. With `:virtual-memory t`, a negative PC looks up `$Y+Z` in both translation caches. `$X` becomes 0, 1 (instruction), 2 (data), or 3 (both). The low three bits of the sum replace the cached protection; 0 removes the key. A nonnegative PC sets `k` and the instruction does not retire. |
+| `#x9A`–`#x9D` | `PRELD`/`PRELDI` `PREGO`/`PREGOI` | With caches off, no-ops. With `:caches t`, `PRELD` fills the data cache with `X+1` bytes at `$Y+Z`, and `PREGO` fills the instruction cache. A missing permission does not raise `rQ`. |
 | `#x9E`–`#x9F` | `GO`/`GOI` | Executed. `$X ← PC+4`, then `PC ← ($Y + Z)` with the low two bits cleared. `rJ` is not written. |
 | `#xA0`–`#xAF` | `STB` `STBU` `STW` `STWU` `STT` `STTU` `STO` `STOU` and `I` forms | Executed. A signed store that does not fit the width sets `V` in `rA` and still writes the low bytes. |
 | `#xB0`–`#xB1` | `STSF`/`STSFI` | Executed. Narrows binary64 to binary32 with the current rounding mode, then writes the tetra. Overflow sets `O` and `X`, not `V`. |
 | `#xB2`–`#xB3` | `STHT`/`STHTI` | Executed. Stores bits 63–32 of `$X` as a tetra. |
 | `#xB4`–`#xB5` | `STCO`/`STCOI` | Executed. Stores the unsigned byte `X` (the instruction field, not `$X`) as an octa. |
-| `#xB6`–`#xB7` | `STUNC`/`STUNCI` | Executed as `STOU`. |
-| `#xB8`–`#xBD` | `SYNCD` `PREST` `SYNCID` and `I` forms | No-ops. |
+| `#xB6`–`#xB7` | `STUNC`/`STUNCI` | With caches off, the same as `STOU`. With `:caches t`, writes memory and drops the matching data line. |
+| `#xB8`–`#xBD` | `SYNCD` `PREST` `SYNCID` and `I` forms | With caches off, no-ops. With `:caches t`, `PREST` fills the data cache. A nonnegative `SYNCD` writes dirty bytes in the `X+1`-byte span back to memory; a negative address also drops those lines. A nonnegative `SYNCID` drops the span from the instruction cache and does that writeback. A negative `SYNCID` drops the span from every cache and leaves memory unchanged. |
 | `#xBE`–`#xBF` | `PUSHGO`/`PUSHGOI` | Executed. Register-stack push, then `rJ ← PC+4`, then the same jump as `GO`. |
 | `#xC0`–`#xCF` | `OR` `ORN` `NOR` `XOR` `AND` `ANDN` `NAND` `NXOR` and `I` forms | Executed across the full 64 bits. |
 | `#xD0`–`#xD7` | `BDIF` `WDIF` `TDIF` `ODIF` and `I` forms | Executed. Saturated unsigned difference of 8, 16, 32, or 64-bit slices. |
@@ -86,15 +90,15 @@ Status in the table means what `execute` does today.
 | `#xF0`–`#xF1` | `JMP`/`JMPB` | Executed. 24-bit relative branch. `XYZ = 0` jumps to itself. |
 | `#xF2`–`#xF3` | `PUSHJ`/`PUSHJB` | Executed. Register-stack push, `rJ ← PC+4`, then a 16-bit relative branch. |
 | `#xF4`–`#xF5` | `GETA`/`GETAB` | Executed. `$X ←` the target address. Control does not branch. |
-| `#xF6`–`#xF7` | `PUT`/`PUTI` | Executed. `PUT` writes `$Z` into special register `X`. `PUTI` writes the unsigned byte `Z`. See [PUT](#put). |
-| `#xF8` | `POP` | Executed. `X` is the number of return values. `PC ← rJ + 4*YZ`. |
-| `#xF9` | `RESUME` | `XYZ = 0` sets `PC ← rW`. Any other `XYZ` faults with "RESUME with a nonzero XYZ is not implemented". |
-| `#xFA`–`#xFB` | `SAVE`/`UNSAVE` | Not executed. Fault: "SAVE/UNSAVE is not implemented". |
-| `#xFC`–`#xFD` | `SYNC`/`SWYM` | No-ops. `SWYM` does not halt. |
-| `#xFE` | `GET` | Executed. `$X ←` special register `Z`, with no permission check. |
-| `#xFF` | `TRIP` | Executed. Enters the trip handler at address 0. See [Trips](#trips). |
+| `#xF6`–`#xF7` | `PUT`/`PUTI` | Executed. `PUT` writes `$Z` into special register `X`. `PUTI` writes the unsigned byte `Z`. A nonzero `Y` field is an illegal instruction. See [PUT](#put). |
+| `#xF8` | `POP` | Executed. `X` is the number of return values. `PC ← rJ + 4*YZ`. A `SAVE` header on top of the stack faults as an empty register stack. |
+| `#xF9` | `RESUME` | `RESUME 0` returns to `rW` when `rX` is negative, and otherwise inserts the low tetra of `rX`. On the default VM, `Z ≠ 0` reports that it is not implemented. `:kernel t` accepts `RESUME 1` from a negative PC. With `:virtual-memory t`, ropcode 3 inserts the `rZZ` translation into the instruction cache when the trapped opcode is `SWYM`, and into the data cache otherwise. A nonzero `X` or `Y` field is an illegal instruction. See [Trips](#trips). |
+| `#xFA`–`#xFB` | `SAVE`/`UNSAVE` | Executed. See [SAVE and UNSAVE](#save-and-unsave). A nonzero unused field, or a `SAVE` whose `$X` is not global, is an illegal instruction. |
+| `#xFC`–`#xFD` | `SYNC`/`SWYM` | `SWYM` does not halt. `SYNC` XYZ 0–3 records a fence tag (`:all`, `:store`, `:load`, `:memory`) that the next retired load or store clears. On one core the visible order matches XYZ 0, because each instruction finishes before the next. XYZ 4 sleeps the core until `wake-core` or a bit in `rQ`. XYZ 5 writes dirty data lines back and keeps them. XYZ 6 drops both translation caches. XYZ 7 drops the instruction and data caches, dirty bytes included. XYZ above 7 sets `b`. XYZ ≥ 4 from a nonnegative PC sets `k` and does none of that while `rK`'s `k` bit is set. |
+| `#xFE` | `GET` | Executed. `$X ←` special register `Z`, with no permission check. A nonzero `Y` field is an illegal instruction. |
+| `#xFF` | `TRIP` | Executed. Enters the trip handler at address 0 with the §35 register image. See [Trips](#trips). |
 
-Load and store addresses are aligned by clearing the low bits (`1`, `2`, `4`, or `8` bytes), not by trapping. An unaligned `STW` at address 1 therefore writes at address 0. Each load or store increments `vm-mems`. Prefetches, `SYNC*`, `SWYM`, and `LDVTS` do not.
+Load and store addresses are aligned by clearing the low bits (`1`, `2`, `4`, or `8` bytes), not by trapping. An unaligned `STW` at address 1 therefore writes at address 0. Each load or store increments `vm-mems`. Prefetches, `SYNC*`, `SWYM`, and `LDVTS` do not. The §50 μ in `vm-mem-cost` is separate: it skips opcodes `#x98`–`#x9F` and `#xB8`–`#xBF`, counts `CSWAP` as 2 and `SAVE`/`UNSAVE` as 20, and counts `LDSF`/`STSF` as 1.
 
 ## Arithmetic
 
@@ -112,7 +116,7 @@ All general-register values are stored as unsigned 64-bit patterns. Signed opera
 | `NEG` | `Y − $Z` as a signed value, `Y` an unsigned byte | `V` when the result does not fit |
 | `NEGU` | Same subtraction modulo 2^64 | no event |
 
-An event bit is always recorded. A trip happens only when the matching enable bit is set. Enables are `rA` bits 15–8, the event bit shifted up by 8. They default to 0, so overflow does not leave the instruction stream unless the program turned the enable on.
+An event bit is recorded when its enable is clear. When the enable is set, the instruction trips and that bit stays clear. Enables are `rA` bits 15–8, the event bit shifted up by 8. They default to 0, so overflow does not leave the instruction stream unless the program turned the enable on. An instruction at a negative address records the bit and does not trip. User mode still faults on a negative address before that instruction can run.
 
 ## Floating point
 
@@ -124,7 +128,7 @@ Comparisons write the integer −1, 0, or +1. `FCMP` of a NaN writes 0 and sets 
 
 `LDSF` loads an aligned tetra and widens it. `STSF` narrows with the current mode and stores that tetra. A binary64 value that does not fit binary32 sets `O` and `X` and still writes the short encoding. A signaling NaN is quieted and sets `I`. `STSF` does not set `V`.
 
-`W I O U Z X` are merged into `rA` after the result is written. Overflow always also sets `X`. Exact underflow sets `U` only when the `U` enable is on. When several enables are on, one trip is taken, at the highest enabled bit of `D V W I O U Z X`, and every event bit from that instruction stays set. Disabled exceptions deliver the IEEE default and do not leave the instruction stream.
+`W I O U Z X` are merged into `rA` after the result is written. Overflow always also sets `X`. Exact underflow sets `U` only when the `U` enable is on. When several enables are on, one trip is taken, at the earliest enabled bit of `D V W I O U Z X`. The bit that trips stays clear. Every other exception bit from that instruction is recorded, including one whose enable was also set. Disabled exceptions deliver the IEEE default and do not leave the instruction stream.
 
 ## Register window
 
@@ -152,9 +156,9 @@ Comparisons write the integer −1, 0, or +1. `FCMP` of a NaN writes 0 and sets 
 
 `POP X,YZ` calls `pop-frame` with `N = X`.
 
-- An empty hidden stack is a fault.
+- An empty hidden stack is a fault. A top octa greater than 255 is not a return hole (it is a `SAVE` header) and faults the same way.
 - If `N > rL`, `N` becomes `rL+1`, which pulls one marginal zero into the returned values.
-- The hole index `x` is the last stacked octa modulo 256.
+- The hole index `x` is that top octa. A real hole is at most 255.
 - Callee `$(N−1)` is written into that hole. Callee `$0`…`$(N−2)` land at caller `$(x+1)` onward. The caller’s saved `$0`…`$(x−1)` are restored.
 - New `rL = min(x+N, rG)`. `POP 0` leaves the hole marginal (`rL = x`). `POP 1` puts the callee’s `$0` in the hole, which is the usual single return value.
 - `PC ← rJ + 4*YZ`.
@@ -166,7 +170,22 @@ rO = Stack_Segment + 8*tau
 rS = rO + 8*rL
 ```
 
-`PUSH`/`POP` with `X < rG` leave `rS` unchanged, which is the usual MMIX invariant. `demo-recursive-factorial` is a complete `PUSHJ`/`POP` factorial and is checked for `0!`, `1!`, `5!`, and `10!`.
+`PUSH`/`POP` with `X < rG` leave `rS` unchanged, which is the usual MMIX invariant. `demo-recursive-factorial` is a complete `PUSHJ`/`POP` factorial and is checked for `0!`, `1!`, `5!`, and `10!`. It does not execute `SAVE`.
+
+### SAVE and UNSAVE
+
+`SAVE $X,0` (`#xFA`) calls `save-context`. `Y` and `Z` must be 0, and `$X` must be global (`X ≥ rG`). Otherwise the instruction is illegal and the stack is unchanged.
+
+1. Push `$0`…`$(rL−1)` and the old `rL` as the hole, the same slide as `push-frame` with `X ≥ rG`. `rL ← 0`.
+2. Push `$rG`…`$255`.
+3. Push `rB`, `rD`, `rE`, `rH`, `rJ`, `rM`, `rR`, `rP`, `rW`, `rX`, `rY`, `rZ`.
+4. Push one octa: top byte `rG`, next three bytes 0, low tetra `rA`.
+5. `$X ←` the address of that octa.
+6. `rO = rS` = the first byte after the image. `POP` faults until `UNSAVE`, because the top octa is the header.
+
+`UNSAVE 0,$Z` (`#xFB`) calls `unsave-context`. `X` and `Y` must be 0. `$Z` is the address of the header octa. The image is read from the top down. When that address is the current top of `vm-stack` (`rO − 8`), the octas come from the vector. When a program has copied the image elsewhere, they come from memory. Restored `rL` is the hole. `rO` returns to the address of the first saved local, and `rS = rO + 8*rL`. A header whose top byte is below 32, whose middle three bytes are nonzero, or whose low tetra has bits above 17 is an illegal instruction.
+
+Both instructions finish inside one `step-vm`. An interruptible `SAVE` would record a phase and a count in `rX` (`α = β = γ`, `rO = rS`, `rL = 0`). That hook belongs to plan 05. `lop_post` still writes globals directly. The MMIX-SIM startup `UNSAVE` is plan 10.
 
 ## Special registers
 
@@ -179,15 +198,22 @@ rS = rO + 8*rL
 | 4 | `rJ` | writable. Also written by `PUSHJ`/`PUSHGO` |
 | 5 | `rM` | writable. `MUX` mask |
 | 6 | `rR` | writable. Also written by `DIV`/`DIVU` |
-| 7 | `rBB` | ignored |
-| 8–18 | `rC` `rN` `rO` `rS` `rI` `rT` `rTT` `rK` `rQ` `rU` `rV` | ignored. `rO` and `rS` are maintained by the VM, not by `PUT` |
+| 7 | `rBB` | ignored on the user path. A kernel instruction at a negative PC may write it. `TRAP` stores `$255` here |
+| 8 | `rC` | ignored on the user path. A kernel `PUT` from a nonnegative PC sets `k` while `rK`’s `k` bit is set. With `:virtual-memory t`, a register-stack spill into a page without `pw` writes the octa to the physical page named by this PTE (page offset taken from the virtual address) and raises bit 31 of `rQ` after the next instruction that runs |
+| 9 | `rN` | ignored, and frozen. `make-vm` writes it once. The high three bytes are `#x010000` (version 1.0.0). The low five bytes are seconds since 1970-01-01 UTC. `reset-vm` keeps the value, including `:clear-registers` |
+| 10–11 | `rO` `rS` | ignored. Maintained by the VM from the hidden stack and `rL` |
+| 12 | `rI` | ignored by `PUT`. A raw value may be any octa. Each retired instruction subtracts 1 while it is nonzero. The step from 1 to 0 sets bit 6 of `rQ`. One tick is one retired instruction. §50 υ lives in `vm-oops` and does not change this countdown. An execute breakpoint that does not run the instruction does not tick, and a fault does not retire |
+| 13–15 | `rT` `rTT` `rK` | ignored on the user path. `:kernel t` sets `rT` and `rTT` to the ROM (`#x8000000100000000`) and `rK` to all ones. `TRAP` and a dynamic trap clear `rK` |
+| 16 | `rQ` | ignored by `PUT` on the user path. `GET` reads it. Bit 6 is set when `rI` reaches 0. A kernel VM traps through `rTT` when `rQ ∧ rK ≠ 0`. `PUT rQ` there keeps bits that came on since the last `GET rQ` |
+| 17 | `rU` | ignored by `PUT`. `up` is bits 63–56, `um` is bits 55–48, bit 47 counts instructions at a negative `PC` only when it is set, and `uc` is bits 46–0. After a retired instruction whose opcode `op` satisfies `(logand op um) = up`, `uc` increases by 1 modulo 2^47. `up = um = 0` counts every retirement. The fetched opcode is the one that counts; `RESUME` does not also count the instruction it inserts |
+| 18 | `rV` | ignored on the default VM. `:virtual-memory t` reads `b1 b2 b3 b4 s r n f`. `f = 0` walks the page table in physical memory. `f = 1` forces a trap whose `rXX` high tetra is `#x03000000`. `f > 1`, or an `s` outside 13…48, is a protection failure |
 | 19 | `rG` | clamped to at least 32. Raising it zeros registers that become marginal. Lowering it zeros former marginals that become global and keeps former locals that become global. If the new `rG` is below `rL`, `rL` drops to the new `rG` |
 | 20 | `rL` | only a smaller value (modulo 256) is accepted |
 | 21 | `rA` | bits 18 and above are discarded (`#x3FFFF` mask) |
-| 22 | `rF` | ignored |
+| 22 | `rF` | ignored by `PUT`. A page-budget failure stores the refused physical address (the page base named in the fault string). That address is not `rW` |
 | 23 | `rP` | writable. Also written by a failing `CSWAP` |
 | 24–27 | `rW` `rX` `rY` `rZ` | writable. Also written by a trip |
-| 28–31 | `rWW` `rXX` `rYY` `rZZ` | ignored |
+| 28–31 | `rWW` `rXX` `rYY` `rZZ` | ignored on the user path. A kernel instruction at a negative PC may write them. `TRAP` and a dynamic trap fill them |
 
 `rA` layout:
 
@@ -210,19 +236,24 @@ Assembler specials accept `rJ`, `J`, or the number `4`. One leading `R` is strip
 | Pool | `#x4000000000000000` |
 | Stack | `#x6000000000000000` |
 
-`vm-memory` is a hash table of 4096-byte pages, keyed by the page number, not a flat vector. A read of a missing page returns 0 and allocates nothing. The first write of a page allocates it, filled with zeros. `(mem-size vm)` is the budget in bytes, which is `:memory-size` rounded up to at least one page (the default budget is `#x2000000`, 32 MiB). Exceeding the budget, or touching an address with bit 63 set, signals `mmix-fault`. `step-vm` catches that condition, stores the reason in `vm-fault`, and halts. It does not escape `run-vm` as a raw Lisp error.
+`vm-memory` is a hash table of 4096-byte chunks, keyed by the chunk number, not a flat vector. On the default VM that key is the virtual page. With `:virtual-memory t` the same hash is physical memory, and an architectural page of `2^s` may span several chunks. A read of a missing chunk returns 0 and allocates nothing. The first write of a chunk allocates it, filled with zeros. `(mem-size vm)` is the budget in bytes, which is `:memory-size` rounded up to at least one chunk (the default budget is `#x2000000`, 32 MiB). Exceeding the budget, or touching an address with bit 63 set on the default VM, signals `mmix-fault`. `step-vm` catches that condition, stores the reason in `vm-fault`, and halts. It does not escape `run-vm` as a raw Lisp error. A kernel VM maps a negative address from a negative PC by clearing bit 63. A nonnegative instruction that uses a negative address sets `n` in `rQ`, a load yields 0, and a store writes nothing.
 
-`mem-ref-u*` / `mem-set-u*` are big-endian. Multi-byte accesses are done a byte at a time, so a value that crosses a page boundary still works. `:internal t` suppresses watchpoints; fetch and the `.mmo` loader use it.
+With `:virtual-memory t`, a nonnegative address is walked from `rV` (`src/translate.lisp`). Fetch asks for `px`, a load for `pr`, a store for `pw`, and `CSWAP` for both `pr` and `pw`. A missing permission sets `r`, `w`, or `x`. A fetch that lacks `px` does not retire. A physical address at or above `2^48` calls `vm-mmio` (the default reads 0, ignores the write, and stores the address in `rF`) and is not entered in a translation cache. `:internal t` keeps the identity map, so the loader and a spill onto a writable page do not need a page table.
+
+`mem-ref-u*` / `mem-set-u*` are big-endian. Multi-byte accesses are done a byte at a time, so a value that crosses a chunk boundary still works. `:internal t` suppresses watchpoints; fetch and the `.mmo` loader use it. Alignment still clears low bits of the virtual address before translation.
 
 `mem-xor` is the `.mmo` content operation: loading the same tetra twice clears it, which is how fixups patch a field that was emitted as zero.
 
 ## Trips
 
-`signal-event` ORs an event bit into `rA`. If the enable is set, `do-trip` runs:
+`signal-events` takes a mask of `rA` event bits. A bit whose enable is clear is ORed into `rA`. The earliest enabled bit trips, and that bit stays clear. Every other bit in the mask is recorded. At a negative `PC` nothing trips and every bit is recorded.
 
-- `rB ← $255`
+`do-trip` enters the handler:
+
+- `rB ←` the previous `$255`
+- `$255 ← rJ`
 - `rW ← PC+4` (the instruction after the one that tripped)
-- `rX ←` the raw instruction
+- `rX ← #x8000000000000000` OR the raw tetra
 - `rY`, `rZ ←` the operands passed by the operation
 - `PC ←` the vector
 
@@ -237,7 +268,18 @@ Assembler specials accept `rJ`, `J`, or the number `4`. One leading `R` is strip
 | Z | `#x02` | 112 |
 | X | `#x01` | 128 |
 
-`TRIP X,Y,Z` always trips, to address 0, with `rY` and `rZ` taken from the instruction fields. The arithmetic result is written before the trip. A floating-point instruction that raises several enabled exceptions records every event bit, then trips once, to the vector of the highest enabled bit. `RESUME` with `XYZ = 0` continues at `rW`. There is no kernel, so `TRAP 0,0,1` (the hardware’s "resume into the kernel" encoding) records a fault and halts. The trip image itself is still the simplified one: `rX` is the raw instruction, and `$255` is not loaded from `rJ`.
+`TRIP X,Y,Z` trips to address 0, with `rY ← $Y` and `rZ ← $Z`. A `TRIP` fetched from a negative address does nothing. The arithmetic result is written before the trip. For a store, `rY` is the virtual address `$Y+Z` and `rZ` is the octa that would have been written. The store still completes.
+
+`RESUME` with `Z ≠ 0` faults with "RESUME with a nonzero XYZ is not implemented". A nonzero `X` or `Y` field is an illegal instruction and halts with `vm-fault`. There is no kernel, so `TRAP 0,0,1` still records a fault and halts.
+
+`RESUME 0` reads `rX`:
+
+- Bit 63 set: `PC ← rW`. The tetra in the low half of `rX` is not executed. This is the return from `TRIP` and from an arithmetic trip.
+- Otherwise the high byte is the ropcode and the low tetra is inserted as though it occupied `rW−4`. Relative branches and a new trip see that address. A fall-through then sets `PC ← rW`. A jump keeps the target the inserted instruction wrote.
+  - Ropcode 0 executes the tetra. An inserted `RESUME` is illegal.
+  - Ropcode 1 executes it with the operands replaced by `rY` and `rZ`. The opcode’s high nybble must be `#x0`–`#x3`, `#x6`, `#x7`, `#xC`, `#xD`, or `#xE`, and `$X` must not be marginal.
+  - Ropcode 2 sets `$X ← rZ`, where `X` is the second byte of the low tetra, and raises the exception bits in bits 47–40 of `rX`. `$X` must not be marginal. Exact underflow (`U` set, `X` clear, `U` enable clear) is dropped. An enabled bit trips.
+  - Ropcode 3 and above are illegal. Ropcode 3 belongs to `RESUME 1`.
 
 ## Traps
 
@@ -279,9 +321,24 @@ Any other `Y = 0` halt still stores `$255` as the exit code. `Fputs` of five cha
 - Wyde immediates (`SETL`, `ORL`, …) must fit in 16 bits. Byte immediates, recognized by a mnemonic that ends in `I` (except `PUTI`, `NEGI`, `NEGUI`), must fit in 8 bits and are unsigned.
 - `(neg $X Y $Z)` and `(negu $X Y $Z)` take `Y` as an unsigned byte. The `I` forms take `Z` as an unsigned byte too.
 - Data: `:byte`, `:wyde`, `:tetra`, `:octa` (and `:word` as an octa alias), `:string`, `:zstring`.
-- `(trap X Y Z)`, `(trip X Y Z)`, `(pop X YZ)`, `(get $X special)`, `(put special $Z)`, `(puti special byte)`, `(swym)`, `(sync xyz)`, `(resume xyz)`, `(save)`, `(unsave)`.
+- `(trap X Y Z)`, `(trip X Y Z)`, `(pop X YZ)`, `(get $X special)`, `(put special $Z)`, `(puti special byte)`, `(swym)`, `(sync xyz)`, `(resume xyz)`, `(save xyz)`, `(unsave xyz)`. The `xyz` integer of `SAVE` and `UNSAVE` is the raw 24-bit field (`SAVE $255` is `#xFF0000`).
 
 `assemble-into` writes each segment with `mem-set-u8`, clears halt/cycle/fault state, stores the label table on the VM, and does not clear registers. `load-program` writes one byte vector at one origin.
+
+## MMIXAL
+
+`assemble-mms` reads a `.mms` string or pathname and returns `(values segments origin labels image)`. The instruction bytes come from `encode-form`, so a listing and the s-expression assembler share one encoder. `load-mms` writes the segments, sets `rG` from the `GREG` counter, stores each `GREG` initial value, and copies line notes and symbols. `PC` is `:Main` when that symbol is present, otherwise the first tetra below `Data_Segment`. `write-mmo` emits those same segments as an `.mmo` image that `load-mmo` accepts.
+
+- The prefix starts as `:`. A name that does not begin with `:` is qualified. `PREFIX :` restores `:`.
+- `dH` defines a local label. `dF` and `dB` refer to the next and previous definition. A missing `dB` is address 0. A missing `dF` is an error.
+- `GREG` counts down from 255 and never assigns `$255`. The counter is the new `rG`. A bare `GREG` uses `@`. Two `GREG`s with the same value stay distinct registers.
+- `SET $X,$Y` is `OR`. `SET $X,pure` is one `SETL` and must fit in 16 bits. `LDA` is `ADDU`. The assembler chooses the immediate and backward opcodes. `ADDI` and `JMPB` are rejected in the source.
+- A two-operand memory instruction searches prior `GREG` bases for a displacement under 256. `LDO $X,$Y` is `LDO $X,$Y,0`.
+- `BYTE`, `WYDE`, `TETRA`, and `OCTA` accept integers and strings. Wider data aligns before its label. Instructions align to 4 before the label. `BSPEC`/`ESPEC` tetras are recorded on the image and are not placed at the location counter.
+- `IS`, `LOC`, and `GREG` cannot be future references. `LOCAL` requires `rG` to exceed the named register. `$31` is local implicitly.
+- Diagnostics name the file and line. A bad mnemonic is a Lisp error.
+
+`mmixal-image-rg`, `mmixal-image-regs`, `mmixal-image-values`, and `mmixal-image-specs` expose the allocation. Symbol names in the stab are fully qualified, including the leading colon. `:Main` is serial 1. The `mmixal` macro language is not implemented.
 
 ## `.mmo` loader
 
@@ -312,9 +369,10 @@ Symbols are `mmix-symbol` values (`name`, `value`, `kind`, `serial`). Absolute v
 
 1. Returns immediately if the VM has halted.
 2. An `:exec` watch on the aligned `PC` sets `vm-break` to `(:exec address)` and returns **before** the instruction. Calling `step-vm` again while `vm-break` is set executes that instruction (`break-skip`). `run-vm` also returns immediately when `vm-break` is already set, so a second `run-vm` does not consume cycles.
-3. Increments `vm-cycles`, fetches, decodes, and executes.
-4. A `mmix-fault` becomes `vm-fault` plus halt.
-5. A `:read` or `:write` watch that fired during the instruction sets `vm-break` **after** the access. `PC` has already moved to the next instruction unless the instruction itself jumped or halted.
+3. Increments `vm-cycles`. On a kernel VM, a nonnegative PC with any `rwxnkbsp` bit of `rK` clear sets `s` in `rQ` and `rK`. If `rQ ∧ rK ≠ 0`, the step writes the trap image and jumps to `rTT` without fetching the user instruction and without updating `rU` or `rI`.
+4. Fetches, decodes, and executes. A fetch from a negative PC records `p` in `rQ`. The fetcher reads the ROM when PC is inside that image. A retired instruction then updates `rU` and, when `rI` is nonzero, `rI`, and `charge` adds the §50 υ and μ for that opcode. A fault and a suppress skip those updates. `k`, `b`, and `x` suppress the instruction: the bit is recorded and PC stays put.
+5. A `mmix-fault` becomes `vm-fault` plus halt.
+6. A `:read` or `:write` watch that fired during the instruction sets `vm-break` **after** the access. `PC` has already moved to the next instruction unless the instruction itself jumped, halted, or was suppressed.
 
 `run-vm` loops until halt or a breakpoint. If `vm-cycles` reaches `:max-cycles` (default 100000) with neither, it signals a Lisp error. That error is intentional; the tests still expect it for a jump-to-self.
 
@@ -322,18 +380,18 @@ Symbols are `mmix-symbol` values (`name`, `value`, `kind`, `serial`). Absolute v
 
 `breakpoint` pushes `(kind . address)` onto `vm-watches`. `clear-breakpoints` drops the watches and the current stop. Fetch does not trip a `:read` watch.
 
-`dump-registers` prints non-zero general registers with the class local, marginal, or global, then `PC`, cycles, mems, halt, `rL`, `rG`, `rJ`, `rA`, `rR`, `rH`, and any fault, breakpoint, exit code, or captured output. `dump-memory` prints 16-byte rows and does not clamp the address to the page budget, so a dump of `Data_Segment` works. `disassemble-at` prints a name, registers, and the computed target of a branch, `JMP`, `GETA`, or `PUSHJ`. `PUT` and `GET` print special-register names.
+`dump-registers` prints non-zero general registers with the class local, marginal, or global, then `PC`, cycles, mems, oops, the §50 mem cost, halt, `rL`, `rG`, `rJ`, `rA`, `rR`, `rH`, then `rN`, `rI`, and `rU` when each is nonzero, and any fault, breakpoint, exit code, or captured output. `oops` is υ and `mem-cost` is μ. `cycles` and `mems` keep their older meanings. `dump-memory` prints 16-byte rows and does not clamp the address to the page budget, so a dump of `Data_Segment` works. `disassemble-at` prints a name, registers, and the computed target of a branch, `JMP`, `GETA`, or `PUSHJ`. `PUT` and `GET` print special-register names.
 
-`reset-vm` clears halt, cycles, mems, fault, exit, breakpoints, captured output, and the hidden stack. `:clear-registers` also zeros both register files, restores `rG = 255`, and reopens the standard handles. `:clear-memory` drops the page table. `rO`/`rS` are recomputed.
+`reset-vm` clears halt, cycles, mems, oops, the §50 mem cost, fault, exit, breakpoints, captured output, the hidden stack, the stack-overflow alert, and both translation caches. `:clear-registers` also zeros both register files, restores `rG = 255`, reopens the standard handles, and writes the previous `rN` back. A kernel VM also restores `rT`, `rTT`, and an all-ones `rK`. `:clear-memory` drops the physical chunks. `rO`/`rS` are recomputed.
 
 ## Public API
 
 Exported from `cl-mmix` (see `src/package.lisp`):
 
-- Construction and slots: `vm`, `make-vm`, `vm-memory`, `vm-registers`, `vm-pc`, `vm-halted`, `vm-cycles`, `vm-special`, `vm-output`, `vm-error-output`, `vm-mems`, `vm-fault`, `vm-exit-code`, `vm-break`, `vm-input`, `vm-labels`, `vm-symbols`, `vm-legacy-putchar`
+- Construction and slots: `vm`, `make-vm`, `vm-memory`, `vm-registers`, `vm-pc`, `vm-halted`, `vm-cycles`, `vm-special`, `vm-output`, `vm-error-output`, `vm-mems`, `vm-oops`, `vm-mem-cost`, `vm-fault`, `vm-exit-code`, `vm-break`, `vm-input`, `vm-labels`, `vm-symbols`, `vm-legacy-putchar`
 - Memory and registers: `mem-size`, `mem-ref-u8` through `mem-set-u64`, `reg`, `set-reg`, `special-reg`, `set-special`, `u64`
 - Execution: `fetch`, `decode`, `step-vm`, `run-vm`, `continue-vm`, `reset-vm`, `breakpoint`, `clear-breakpoints`
-- Loading: `assemble`, `assemble-into`, `load-program`, `load-mmo`
+- Loading: `assemble`, `assemble-into`, `load-program`, `load-mmo`, `assemble-mms`, `load-mms`, `write-mmo`, `mmixal-image`, `mmixal-image-rg`, `mmixal-image-regs`, `mmixal-image-values`, `mmixal-image-specs`
 - Inspection: `disassemble-at`, `dump-registers`, `dump-memory`
 - Demos: `demo-sum-1-to-n`, `demo-factorial`, `demo-recursive-factorial`, `demo-putchar-hello`, `demo-hello`
 - Constants: `+op+`, the four segment bases, and `+r-a+` `+r-b+` `+r-d+` `+r-e+` `+r-g+` `+r-h+` `+r-j+` `+r-l+` `+r-m+` `+r-p+` `+r-r+` `+r-w+` `+r-x+` `+r-y+` `+r-z+`
@@ -341,21 +399,20 @@ Exported from `cl-mmix` (see `src/package.lisp`):
 
 `set-special` is a raw write. The `PUT` instruction is the one that applies the restrictions above. `special-reg` is a raw read.
 
-`make-vm` keywords are `:memory-size`, `:pc`, `:input`, and `:legacy-putchar`.
+`make-vm` keywords are `:memory-size`, `:pc`, `:input`, `:legacy-putchar`, `:kernel`, `:virtual-memory`, `:caches`, and `:cache-config`. `:virtual-memory t` without `:kernel t` signals an error. `:cache-config` is a plist of `associativity` (default 2), `blocksize` (default 64), `writeback`, `writeallocate`, `accesstime`, `sets` (default 256), and `secondary`. `accesstime` is stored for plan 11.
 
 ## What the tests lock down
 
-`sbcl --script tests/run-tests.lisp` runs 73 checks. `tests/tests.lisp` covers decode, big-endian memory, the original sum/factorial/hello demos, the cycle limit, branch opcode bytes (`JMPB` is `#xF1FFFFFF` for a one-instruction backward jump; a forward `BZ` with displacement 2 is `#x42010002`), shift and divide edge cases, `MULU`’s high half, `LDA`/`2ADDU`/`16ADDU`, the register window and `PUT`, conditional sets, alignment and the `V` bit on `STB`, `MOR` byte reversal, `GO` leaving `rJ` alone, `PUSHJ`/`GETA`, recursive factorial, the page budget, kernel-address faults, `FADD` of zeros followed by the `SAVE` fault, `TRIP`/`RESUME`, an enabled `V` trip, `Fopen` refusing handles 0–2, legacy putchar, `Fgets`/`Fwrite`, breakpoints, and a hand-built `.mmo` image (including XOR, `lop_fixo`, a `Main` symbol, and a data-segment location). `tests/float.lisp` covers binary64 arithmetic, signed zero, ties to even, overflow with and without the `O` enable, `FDIV` by zero, `FSQRT` of −1, `FREM`, `FCMPE`/`FEQLE`, `LDSF`/`STSF`, and `FIX` of 2^63.
+`sbcl --script tests/run-tests.lisp` runs 153 checks. `tests/tests.lisp` covers decode, big-endian memory, the original sum/factorial/hello demos, the cycle limit, branch opcode bytes (`JMPB` is `#xF1FFFFFF` for a one-instruction backward jump; a forward `BZ` with displacement 2 is `#x42010002`), shift and divide edge cases, `MULU`’s high half, `LDA`/`2ADDU`/`16ADDU`, the register window and `PUT`, conditional sets, alignment and the `V` bit on `STB`, `MOR` byte reversal, `GO` leaving `rJ` alone, `PUSHJ`/`GETA`, recursive factorial, the page budget (including `rF` on the refused page), kernel-address faults, `FADD` of zeros followed by an illegal `SAVE` whose `$X` is not global, `SAVE`/`UNSAVE` (round trip, header, `POP` after `SAVE`, a nonzero `Y`, and a moved image), `TRIP`/`RESUME 0` (including ropcodes 0–2 and a nonzero `Y` on `PUT`), an enabled `V` trip, `rN` (frozen across `PUT` and `reset-vm`), `rI` (countdown, `rQ` bit 6, `GET`, and a breakpoint that does not tick), `rU` (every retirement, and `POP` only), `Fopen` refusing handles 0–2, legacy putchar, `Fgets`/`Fwrite`, breakpoints, a hand-built `.mmo` image (including XOR, `lop_fixo`, a `Main` symbol, and a data-segment location), and `:kernel t` (`Fputs` through the ROM, halt, `PUT rK`, a dynamic trap into `rTT`, `RESUME 1` from a nonnegative PC, a negative address, ropcode 3, and a sticky `PUT rQ`), and `:virtual-memory t` (a hardware walk, a fetch without `px`, a negative address, software translation through `RESUME 1`, `LDVTS`, `SYNC` 6, `vm-mmio`, an `rC` stack spill, an auxiliary page, and an `n` mismatch), and `:caches t` (a dirty line, `SYNC` 5, `LDUNC`, `STUNC`, a data-segment store, `SYNCID` from a nonnegative and a negative address, privileged `SYNC` 7, `SYNC` 8, fence tags, power-save, and `PRELD`), and §50 costs (ten `ADDU`s, a taken backward `BZ` and `PBZ`, `MUL` then `DIV`, `LDO`, `GO`, `CSWAP`, `demo-sum-1-to-n` still returning 55 with its cycle count on `vm-cycles`, and a faulting load that adds no υ or μ), and MMIXAL (a `.mms` factorial of 10 leaving `$3` = 3628800, the same image through `write-mmo` then `load-mmo`, `GREG @` with `rG` = 254, `1F`/`1B` encoded as `#xF0000002` and `#xF1FFFFFE`, a `BSPEC` tetra kept out of the text segment, an expression, a base-relative `LDB`, `PREFIX`, a `:Main` entry, and a rejected `ADDI`). The default VM’s `Fputs` still leaves `rT` at 0. `tests/float.lisp` covers binary64 arithmetic, signed zero, ties to even, overflow with and without the `O` enable, `FDIV` by zero, `FSQRT` of −1, `FREM`, `FCMPE`/`FEQLE`, `LDSF`/`STSF`, and `FIX` of 2^63.
 
 ## What is still not MMIX
 
 The full catalog, including kernel mode and multi-core, is [TAOCP-GAP-ANALYSIS.md](TAOCP-GAP-ANALYSIS.md). The short list:
 
-- `SAVE` and `UNSAVE`.
-- `RESUME` other than `XYZ = 0`.
-- Virtual memory: no `rV`, no page tables, `LDVTS` returns 0, bit 63 is a hard fault rather than a kernel mapping.
-- Dynamic traps and the privileged specials that a kernel would update (`rT`, `rTT`, `rK`, `rQ`, `rC`, and the bootstrap copies).
-- A pipeline, prediction for `PB*`, and separate υ/μ counts. `vm-cycles` counts instructions. `vm-mems` counts loads and stores.
-- Cache semantics. `LDUNC`, `STUNC`, `PRE*`, `SYNC`, `SYNCD`, and `SYNCID` do not change memory ordering.
+- `RESUME 1` on the default VM (`Z ≠ 0` still reports that it is not implemented). `RESUME 0` inserts ropcodes 0–2. `SAVE`/`UNSAVE` run to completion in one instruction; the interruptible spill is not recorded in `rX`.
+- Virtual memory stays off on the default VM: the four segments are an identity map, bit 63 is a hard fault, and `LDVTS` returns 0. `:virtual-memory t` (with `:kernel t`) walks `rV`, sets `r`/`w`/`x` on a protection failure, traps when `f = 1`, edits the translation caches from `LDVTS`, drops them on `SYNC` 6, sends physical addresses at or above `2^48` to `vm-mmio`, and spills a register stack that lacks `pw` through `rC`. Without the flag, ropcode 3 stores the page-table pair and leaves the translation caches empty.
+- The default VM does not take dynamic traps. `rI` sets `rQ` bit 6 and stops there until `:kernel t`, which enters `rTT` when `rK` unmasks the bit. `rC` is consulted only when virtual memory is on. The ROM services `TRAP`; a dynamic trap enters the same address.
+- A pipeline. `PB*` prediction in this tree is the §50 hand estimate: ordinary branches predict not taken and probable branches predict taken, and `vm-oops` records 1υ or 3υ from that outcome. `vm-cycles` still counts one per `step-vm` that passes an execute breakpoint. `vm-mems` still counts loads and stores. `vm-oops` and `vm-mem-cost` are the §50 totals. Hit and miss delays remain plan 11.
+- Line caches stay off on the default VM, so `LDUNC` is `LDOU`, `STUNC` is `STOU`, and `PRE*`/`SYNCD`/`SYNCID` change nothing. `:caches t` writebacks through `SYNCD` and `SYNC` 5, and `SYNC` 0–3 records a fence tag for a later pipeline. Hit and miss delays are plan 11. A write buffer that drains on its own is still absent.
 - Newline translation on text-mode `Fopen`.
-- An MMIXAL (`.mms`) assembler. The s-expression assembler emits the same opcode bytes; `mmixal` output is consumed by `load-mmo`.
+- The `mmixal` macro language. Listings that stay within `LOC`, `IS`, `GREG`, `PREFIX`, `LOCAL`, data, expressions, and ordinary instructions assemble with `assemble-mms`.

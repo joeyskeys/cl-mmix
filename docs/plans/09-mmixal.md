@@ -1,5 +1,7 @@
 # Plan 09 — MMIXAL
 
+Status: implemented. `src/mmixal.lisp` provides `assemble-mms`, `load-mms`, and `write-mmo`. Instruction bytes come from `encode-form`. The `mmixal` macro language is still absent.
+
 Depends on the s-expression assembler (`src/asm.lisp`) and the `.mmo` loader (`src/mmo.lisp`). No kernel and no floating point.
 
 Spec: the MMIXAL chapter of MMIXware (`mmixal.w`): `LOC`, `IS`, `GREG`, `PREFIX`, `LOCAL`, `BYTE`, `WYDE`, `TETRA`, `OCTA`, `BSPEC`, `ESPEC`, expressions, and local labels.

@@ -1,5 +1,7 @@
 # Plan 07 — Caches and SYNC
 
+Status: implemented. `:caches t` on `make-vm` builds the write-back caches in `src/cache.lisp`. The default constructor leaves them empty, so loads and stores still reach memory in the same step.
+
 Depends on [06](06-virtual-memory.md) for physical addresses, negative addresses, and translation caches. A functional fence can be unit-tested on the identity map before plan 06 turns translation on. Depends on [05](05-kernel-traps.md) for the privileged-instruction check on `SYNC` XYZ ≥ 4.
 
 Spec: `mmix-doc` §30 and §31. Cache geometry defaults follow [mmix-config](https://mmix.cs.hm.edu/doc/mmix-config.pdf): the translation caches exist by default; instruction and data caches exist when configured.
@@ -54,4 +56,4 @@ Alignment, endianness, and the results of loads and stores when caches are off. 
 
 ## Follow-ons
 
-Plan 11 adds hit and miss delays from `accesstime`. Plan 12 keeps one cache per core and uses the fence tags as the memory order between cores.
+Plan 11 uses `accesstime` as the M-stage latency when `:caches` and `:pipeline` are both on. A hit and a miss take that same latency. Plan 12 keeps one cache per core and uses the fence tags as the memory order between cores.

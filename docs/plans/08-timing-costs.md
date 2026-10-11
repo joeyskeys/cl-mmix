@@ -1,5 +1,7 @@
 # Plan 08 — μ and υ costs
 
+Status: implemented. `charge` in `src/ops.lisp` adds §50 υ to `vm-oops` and μ to `vm-mem-cost` when `execute` returns. `vm-cycles`, `vm-mems`, and `rI` keep their previous meanings. `LDSF`/`STSF` take 4υ and 1μ. `PUSHGO` takes 3υ and no μ, the same as `GO`.
+
 Depends on nothing. Branch-prediction costs match the functional branches already in `src/ops.lisp`. Floating-point costs become real when [01](01-floating-point.md) retires those opcodes instead of faulting.
 
 Spec: `mmix-doc` §50.
@@ -59,4 +61,4 @@ A faulting floating-point opcode, before plan 01, adds nothing because it does n
 
 ## Follow-ons
 
-Plan 11 reports pipeline cycles in a third slot and leaves these §50 totals available as the hand-estimate line. Plan 10 prints both in the statistics command.
+Plan 11 reports pipeline cycles in `vm-pipe-cycles` and leaves these §50 totals available as the hand-estimate line. Plan 10 prints both, plus `pipe=`, in the statistics command.

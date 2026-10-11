@@ -1,5 +1,7 @@
 # Plan 03 — SAVE and UNSAVE
 
+Status: implemented. `save-context` and `unsave-context` in `src/machine.lisp`, dispatched from `execute`. The image is written and read inside one `step-vm`. A phase and count in `rX` is the plan 05 hook and is not updated yet.
+
 Depends on the register stack in `src/machine.lisp` (`push-frame`, `pop-frame`, `vm-stack`, `rO`, `rS`). Interruptible saves need plan 05; the memory image in this plan is complete without it.
 
 Spec: `mmix-doc` §43. The loader prelude that *uses* `UNSAVE` is plan 10.

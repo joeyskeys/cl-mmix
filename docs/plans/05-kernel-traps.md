@@ -1,5 +1,7 @@
 # Plan 05 — Kernel traps
 
+Status: implemented. `:kernel t` on `make-vm` enters `rT` / `rTT`. The default constructor still uses Lisp `exec-trap`. ROM and trap entry are in `src/kernel.lisp`.
+
 Depends on [02](02-trips-and-resume.md) for ropcodes and on [03](03-save-unsave.md) if the ROM’s process exit uses `SAVE`. The ROM’s file services call the functions already in `src/trap.lisp`.
 
 Spec: `mmix-doc` §33 and §36–38. MMIX-SIM’s Y-field table stays the user-visible service set.

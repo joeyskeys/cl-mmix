@@ -1,8 +1,8 @@
 # Plan 01 — Floating point
 
-Status: implemented in `src/float/`. Enabled exceptions trip through the entry that is in the tree today, so the event bit stays set and `rX` is the raw instruction. [Plan 02](02-trips-and-resume.md) rechecks that image.
+Status: implemented in `src/float/`. Enabled exceptions trip through the [plan 02](02-trips-and-resume.md) entry: the bit that trips stays clear, `rX` is negative, and `$255` is loaded from `rJ`.
 
-Depends on [02](02-trips-and-resume.md) for the trip entry that enabled exceptions use. The arithmetic itself can be written against today’s `signal-event`, then rechecked once plan 02 lands.
+Depends on [02](02-trips-and-resume.md) for the trip entry that enabled exceptions use. That entry is in the tree; `commit-fp-exceptions` calls `signal-events`.
 
 Spec: `mmix-doc` §21–28 and the exception rules in §32. Opcodes `#x01`–`#x17`, `#x90`–`#x91`, `#xB0`–`#xB1`.
 

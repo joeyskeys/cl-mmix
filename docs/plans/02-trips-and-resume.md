@@ -1,6 +1,8 @@
 # Plan 02 — Trips and RESUME 0
 
-Depends on nothing in the current tree. Plan 01 should land after this one so floating-point exceptions use the same entry.
+Status: implemented. `do-trip` and `signal-events` in `src/machine.lisp`, `exec-resume` in `src/ops.lisp`. Enabled floating-point exceptions in `src/float/exec.lisp` use the same entry.
+
+Depends on nothing in the current tree. Plan 01 landed first, on the old trip entry, and was rechecked when this plan landed.
 
 Spec: `mmix-doc` §32, §34, §35, and §38 for `Z = 0`. `RESUME 1` is plan 05.
 

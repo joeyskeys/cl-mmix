@@ -4,6 +4,11 @@
    ;; Machine
    #:vm
    #:make-vm
+   #:machine
+   #:make-machine
+   #:machine-cores
+   #:step-core
+   #:run-machine
    #:vm-memory
    #:vm-registers
    #:vm-pc
@@ -13,6 +18,8 @@
    #:vm-output
    #:vm-error-output
    #:vm-mems
+   #:vm-oops
+   #:vm-mem-cost
    #:vm-fault
    #:vm-exit-code
    #:vm-break
@@ -20,6 +27,12 @@
    #:vm-labels
    #:vm-symbols
    #:vm-legacy-putchar
+   #:vm-profile
+   #:vm-pipe-cycles
+   #:step-cycle
+   #:pipe-stage-pc
+   #:pipe-drain-count
+   #:sim-command
    ;; Memory / registers
    #:mem-size
    #:mem-ref-u8 #:mem-set-u8
@@ -36,6 +49,7 @@
    #:run-vm
    #:continue-vm
    #:reset-vm
+   #:wake-core
    #:breakpoint
    #:clear-breakpoints
    ;; Assembler / loader
@@ -43,6 +57,14 @@
    #:load-program
    #:assemble-into
    #:load-mmo
+   #:assemble-mms
+   #:load-mms
+   #:write-mmo
+   #:mmixal-image
+   #:mmixal-image-rg
+   #:mmixal-image-regs
+   #:mmixal-image-values
+   #:mmixal-image-specs
    ;; Inspection
    #:disassemble-at
    #:dump-registers

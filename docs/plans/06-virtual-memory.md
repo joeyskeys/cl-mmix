@@ -1,5 +1,7 @@
 # Plan 06 — Virtual memory
 
+Status: implemented. `:virtual-memory t` on `make-vm` requires `:kernel t` and walks `rV` in `src/translate.lisp`. The default constructor keeps the identity map, faults on bit 63, and returns 0 from `LDVTS`.
+
 Depends on [05](05-kernel-traps.md) for protection faults, `RESUME 1`, and ropcode 3. The continuation register’s format comes from [04](04-machine-specials.md).
 
 Spec: `mmix-doc` §44–47.

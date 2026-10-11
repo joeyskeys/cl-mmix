@@ -1,5 +1,7 @@
 # Plan 04 — Machine specials
 
+Status: implemented. `stamp-serial`, `tick-interval`, and `note-usage` in `src/machine.lisp`. `step-vm` calls the counters after a retired instruction. `PUT` of these registers stays ignored on the user-mode path. `rQ` bit 6 traps through `rTT` when `:kernel t` unmasks it (plan 05). `rC` is consulted when `:virtual-memory t` spills a register stack onto a page without `pw` (plan 06). On the default VM it is stored and not read.
+
 Depends on nothing for the counters and the frozen serial. Raising `rQ` has no effect until plan 05. The continuation page is consulted when plan 06’s protection faults exist; this plan stores `rC` in the architectural format.
 
 Spec: `mmix-doc` §40 (`rI`, `rU`), §41 (`rN`), §45 (`rC`), §48 (`rF`).
@@ -57,4 +59,4 @@ The 32 specials are a vector of zeros (`src/machine.lisp`). `PUT` ignores number
 
 ## Follow-ons
 
-Plan 05 delivers the interval bit through `rTT` when `rK` unmasks it. Plan 08 may redefine one `rI` tick as one υ. Plan 06 uses `rC` when a stack spill touches a page without write permission.
+Plan 05 delivers the interval bit: a kernel VM whose `rK` unmasks `rQ` bit 6 traps through `rTT` on the next `step-vm`. Plan 08 may redefine one `rI` tick as one υ. Plan 06 uses `rC` when a stack spill touches a page without write permission.

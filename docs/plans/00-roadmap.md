@@ -8,7 +8,7 @@ The gap catalog is [../TAOCP-GAP-ANALYSIS.md](../TAOCP-GAP-ANALYSIS.md). The beh
 |------|------|-------------|---------|
 | 1 | [02 Trips and RESUME 0](02-trips-and-resume.md) | Landed. §35 image and ropcodes 0–2 | Spec-correct arithmetic trips, which floating point needs |
 | 2 | [01 Floating point](01-floating-point.md) | Landed. Enabled exceptions use the plan 02 trip entry | The last data opcodes except `SAVE`/`UNSAVE` |
-| 3 | [08 Timing costs](08-timing-costs.md) | Current tree; branch costs get sharper after plan 02 | The μ + υ line students check by hand |
+| 3 | [08 Timing costs](08-timing-costs.md) | Landed. `vm-oops` and `vm-mem-cost` follow §50; `vm-cycles` and `vm-mems` keep their old meanings | Pipeline delays are plan 11 |
 | 4 | [03 SAVE and UNSAVE](03-save-unsave.md) | Landed. Full §43 image in one step; interruptible spill is plan 05 | Process images, and the MMIX-SIM startup prelude |
 | 5 | [04 Machine specials](04-machine-specials.md) | Landed. `rN` frozen, `rI`/`rU` count retired instructions, `rF` records a refused page | Interval delivery through `rTT` is plan 05 |
 | 6 | [09 MMIXAL](09-mmixal.md) | Current assembler and `.mmo` loader | `.mms` in process |

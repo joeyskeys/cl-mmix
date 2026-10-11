@@ -11,8 +11,9 @@
                   (cond ((< i l) "local")
                         ((< i g) "marginal")
                         (t "global"))))))
-    (format stream "PC=#x~X  cycles=~D  mems=~D  halted=~A~%"
-            (vm-pc vm) (vm-cycles vm) (vm-mems vm) (vm-halted vm))
+    (format stream "PC=#x~X  cycles=~D  mems=~D  oops=~D  mem-cost=~D  halted=~A~%"
+            (vm-pc vm) (vm-cycles vm) (vm-mems vm)
+            (vm-oops vm) (vm-mem-cost vm) (vm-halted vm))
     (format stream "rL=~D  rG=~D  rJ=#x~X  rA=#x~X  rR=#x~X  rH=#x~X~%"
             l g
             (special-reg vm +r-j+)

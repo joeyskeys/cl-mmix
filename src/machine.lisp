@@ -141,6 +141,10 @@
   (halted nil :type boolean)
   (cycles 0 :type unsigned-byte)
   (mems 0 :type unsigned-byte)
+  ;; §50 hand estimate. oops is υ; mem-cost is μ. vm-cycles and vm-mems
+  ;; keep their older meanings (instructions fetched, load/store operations).
+  (oops 0 :type unsigned-byte)
+  (mem-cost 0 :type unsigned-byte)
   (output (make-array 0 :element-type 'character :fill-pointer 0 :adjustable t)
           :type (vector character))
   (error-output (make-array 0 :element-type 'character :fill-pointer 0 :adjustable t)
@@ -244,6 +248,8 @@ still reach memory in the same step."
         (vm-halted vm) nil
         (vm-cycles vm) 0
         (vm-mems vm) 0
+        (vm-oops vm) 0
+        (vm-mem-cost vm) 0
         (vm-fault vm) nil
         (vm-exit-code vm) nil
         (vm-break vm) nil
@@ -313,8 +319,9 @@ Unix time at which this VM was created. Later PUT and reset-vm leave it."
 
 (defun tick-interval (vm)
   "One retired instruction. rI counts down; the step from 1 to 0 sets rQ bit 6.
-Until plan 08 a tick is one instruction, not one υ. A kernel VM whose rK
-unmasks that bit takes a dynamic trap on the following step-vm."
+A tick is one instruction. υ in vm-oops is a separate §50 total and does not
+change rI. A kernel VM whose rK unmasks the interval bit takes a dynamic trap
+on the following step-vm."
   (let ((ri (special-reg vm +r-i+)))
     (when (plusp ri)
       (let ((next (1- ri)))

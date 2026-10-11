@@ -1,6 +1,6 @@
 # cl-mmix vs a full MMIX machine
 
-This document is the gap between the sources described in [IMPLEMENTATION.md](IMPLEMENTATION.md) (ASDF system `cl-mmix` 0.12.0) and a complete MMIX. It replaces the older write-up, which compared an early MVP (flat registers, about 64 opcodes, a private putchar `TRAP`) with a user-mode practice target. That user-mode target is what the tree implements now. The paragraphs below describe what is still missing after it.
+This document is the gap between the sources described in [IMPLEMENTATION.md](IMPLEMENTATION.md) (ASDF system `cl-mmix` 0.13.0) and a complete MMIX. It replaces the older write-up, which compared an early MVP (flat registers, about 64 opcodes, a private putchar `TRAP`) with a user-mode practice target. That user-mode target is what the tree implements now. The paragraphs below describe what is still missing after it.
 
 The work that closes each gap is a separate plan under [plans/](plans/00-roadmap.md).
 
@@ -31,7 +31,7 @@ Where this file and the code disagree, the code wins for “implemented” and `
 
 ## Baseline already in the tree
 
-These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (133 checks) and must keep `make-vm` usable as a user-mode interpreter.
+These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (142 checks) and must keep `make-vm` usable as a user-mode interpreter.
 
 - All 256 opcode bytes are named in `src/decode.lisp`.
 - Integer arithmetic, shifts, compares, bitwise ops, wyde immediates, conditional sets, branches (including backward and probable forms), `JMP`/`GETA`/`GO`/`PUSHJ`/`PUSHGO`/`POP`, tetra and immediate loads and stores, `LDHT`/`STHT`/`STCO`/`CSWAP`/`MOR`/`MXOR`.
@@ -43,7 +43,7 @@ These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (
 - MMIX-SIM `TRAP` services Y = 0…10, intercepted in Lisp. Handles 0–2 are StdIn, StdOut, StdErr. Legacy putchar is opt-in.
 - S-expression assembler, `.mmo` loader, breakpoints, `step-vm` / `run-vm` / `continue-vm`, dumps.
 
-`vm-cycles` counts retired instructions. `vm-mems` counts loads and stores. That is a runaway guard and a rough mem count. It is not μ/υ, and it is not a pipeline.
+`vm-cycles` counts one per `step-vm` that passes an execute breakpoint. `vm-mems` counts loads and stores, including operations §50 leaves out of μ. `vm-oops` and `vm-mem-cost` are the §50 υ and μ totals. That is still not a pipeline.
 
 ## Catalog
 
@@ -56,7 +56,7 @@ These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (
 | [05](plans/05-kernel-traps.md) | Forced and dynamic traps | Implemented behind `:kernel`. Default `make-vm` still uses Lisp `exec-trap`, faults on bit 63, and ignores privileged `PUT` | `rT` / `rTT`, `rK`/`rQ`, `rwxnkbsp`, `RESUME 1`, kernel ROM for MMIX-SIM |
 | [06](plans/06-virtual-memory.md) | `rV` translation | Implemented behind `:virtual-memory` (requires `:kernel`). Default `make-vm` keeps the identity map and `LDVTS` returns 0 | Same walk; line caches landed in plan 07 |
 | [07](plans/07-cache-and-sync.md) | Caches and `SYNC` | Implemented behind `:caches`. Default `make-vm` still stores straight to memory. `SYNC` 0–3 records a fence tag | Same caches; hit and miss delays are plan 11 |
-| [08](plans/08-timing-costs.md) | μ and υ | One counter per instruction, one per load/store | §50 costs, including mispredicted branches |
+| [08](plans/08-timing-costs.md) | μ and υ | Implemented. `vm-oops` and `vm-mem-cost` follow §50, including mispredicted branches. `vm-cycles`, `vm-mems`, and `rI` keep their old meanings | Pipeline cycle counts are plan 11 |
 | [09](plans/09-mmixal.md) | MMIXAL | S-expressions only; `.mmo` loads | `.mms` in process: `LOC`, `GREG`, `IS`, local labels, expressions, `PREFIX` |
 | [10](plans/10-simulator-session.md) | MMIX-SIM session | Library API, raw file bytes, no argv | Text newlines, `argc`/`argv`, interactive commands, profile |
 | [11](plans/11-pipeline.md) | Pipeline | One instruction retires before the next is fetched | Configurable F–D–X–M–W pipeline, one core, as in MMMIX |
@@ -190,7 +190,7 @@ On a machine with a write buffer or a write-back data cache:
 | `CSWAP` | 2μ + 2υ |
 | `SAVE`, `UNSAVE` | 20μ + υ |
 
-Prediction in that table: ordinary branches predict not taken, probable branches (`PB*`) predict taken. `vm-cycles` and `vm-mems` do not match this table. Plan 08 adds the counters on the functional interpreter. Plan 11 replaces them, when a pipeline is enabled, with cycle counts from the pipe.
+Prediction in that table: ordinary branches predict not taken, probable branches (`PB*`) predict taken. `charge` applies that table when an instruction retires. `LDSF`/`STSF` cost 4υ and 1μ. `PUSHGO` costs 3υ and no μ. `vm-cycles` and `vm-mems` stay beside `vm-oops` and `vm-mem-cost`. Plan 11, when a pipeline is enabled, reports pipeline cycles in a third slot and leaves these §50 totals available.
 
 MMMIX’s pipeline has stages F, D, X, M, W, with X split into XF (add), XM (multiply), and XD (divide). A configuration file sets functional-unit latencies and up to five caches (instruction, data, secondary, and two translation caches): associativity, block size, write-back, write-allocate, access time, ports, replacement. `mmmix` simulates one processor. Plan 11 is that one processor. It does not grow a second core; plan 12 does.
 
@@ -222,7 +222,7 @@ Still different from `mmix prog.mmo args…` and from the `mmix>` prompt:
 - **Startup image.** `$0` is `argc`. `$1` points at the first argument pointer. The program name is argument 0. Strings and pointers live in `Pool_Segment`. `M[Pool_Segment]` is the first free pool octa. `rL` starts at 2. MMIX-SIM builds this by fabricating a stack and executing `UNSAVE`. `load-mmo` sets `PC` to `Main` and does not build that image.
 - **Text files.** Modes 0 and 1 are C text streams (`"r"` / `"w"`). Newline inside the guest is the byte `#x0A` (wyde `#x000A`). Host text translation happens at the stream boundary. Modes 2–4 are binary. This tree opens every file as `(unsigned-byte 8)` and does not translate.
 - **Interactive commands.** Step (empty line), `c`, `q`, `s`, dump and assign with `!` `.` `#` `"`, `+`, `@`, trace `t`/`u`, breakpoints `b[rwx]`, segment `T`/`D`/`P`/`S`, `B`, `i`, `h`. The Lisp API has `step-vm`, `continue-vm`, three breakpoint kinds, and hex dumps. It has no command reader, no floating or string dump, and no tracepoint separate from a breakpoint.
-- **Profile and the statistics line.** MMIX-SIM can count executions per instruction and print mems and oops. `vm-lines` holds file and line from `lop_line`. Nothing increments a profile, and the exit report is `vm-cycles` plus `vm-mems`.
+- **Profile and the statistics line.** MMIX-SIM can count executions per instruction and print mems and oops. `vm-lines` holds file and line from `lop_line`. Nothing increments a profile. `dump-registers` prints `vm-cycles`, `vm-mems`, `vm-oops`, and `vm-mem-cost`. The interactive statistics command is still plan 10.
 
 `SWYM` is specified as a no-op whose XYZ fields may signal a debugger. The functional interpreter correctly retires it as a no-op. A debugger hook on `SWYM` belongs to plan 10, not to a change in the opcode’s register effect.
 

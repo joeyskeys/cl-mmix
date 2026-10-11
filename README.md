@@ -183,7 +183,7 @@ sbcl --script tests/run-tests.lisp
 
 [docs/TAOCP-GAP-ANALYSIS.md](docs/TAOCP-GAP-ANALYSIS.md) is the gap between this tree and a full machine (kernel, remaining opcodes, virtual memory, pipeline, and multi-core). [docs/plans/00-roadmap.md](docs/plans/00-roadmap.md) is the order of work. The largest holes:
 
-- No pipeline, and no `υ`/`μ` counts beyond a simple `mems` counter. Dynamic traps and `RESUME 1` run when `make-vm` is called with `:kernel t`. Page tables run with `:virtual-memory t` as well. The default VM still has neither, and bit 63 of an address still faults there. `LDVTS` returns 0 on that default VM.
+- No pipeline. §50 μ and υ are `vm-mem-cost` and `vm-oops`. `vm-cycles` still counts one per `step-vm` that passes an execute breakpoint, and `vm-mems` still counts load and store operations. Dynamic traps and `RESUME 1` run when `make-vm` is called with `:kernel t`. Page tables run with `:virtual-memory t` as well. The default VM still has neither, and bit 63 of an address still faults there. `LDVTS` returns 0 on that default VM.
 - `RESUME 1` (`Z ≠ 0`) on the default VM is still the unimplemented path. `RESUME 0` inserts ropcodes 0–2.
 - `SWYM` does not halt. With caches off, `PRE*`/`SYNCD`/`SYNCID` change nothing and `LDUNC`/`STUNC` are ordinary octa accesses. `:caches t` writebacks dirty lines and records `SYNC` 0–3 as a fence tag. Hit and miss delays are still absent. `SYNC` 6 drops the translation caches when virtual memory is on.
 - `Fopen` text and binary modes are not newline-translated.

@@ -330,6 +330,8 @@ PC becomes the first origin. Labels are stored on the VM."
           (vm-halted vm) nil
           (vm-cycles vm) 0
           (vm-mems vm) 0
+          (vm-oops vm) 0
+          (vm-mem-cost vm) 0
           (vm-fault vm) nil
           (vm-labels vm) labels)
     (values vm org labels)))
@@ -340,5 +342,7 @@ PC becomes the first origin. Labels are stored on the VM."
         do (mem-set-u8 vm (+ origin i) (aref bytes i) :internal t))
   (setf (vm-pc vm) (u64 origin)
         (vm-halted vm) nil
-        (vm-cycles vm) 0)
+        (vm-cycles vm) 0
+        (vm-oops vm) 0
+        (vm-mem-cost vm) 0)
   vm)

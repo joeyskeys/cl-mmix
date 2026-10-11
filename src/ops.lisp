@@ -549,12 +549,61 @@ a ropcode above 3, and ropcode 3 on RESUME 0 are illegal."
 (declaim (ftype (function (t t) t) host-swym-p)
          (ftype (function (t) t) host-dispatch deliver-dynamic-trap))
 
+(defun branch-mispredicted-p (op taken)
+  "Ordinary BN…BEV predict not taken. Probable PBN…PBEV predict taken."
+  (if (< op #x50)
+      taken
+      (not taken)))
+
+(defun instruction-cost (op taken)
+  "§50 (υ μ) for one retired opcode. TAKEN matters only for #x40–#x5F.
+LDSF and STSF are the floating-point load and store: 4υ and 1μ.
+PUSHGO is a GO, so 3υ and no μ. The holes #x98–#x9F and #xB8–#xBF
+contribute no μ."
+  (cond
+    ((or (= op #x94) (= op #x95))
+     (values 2 2))
+    ((or (= op #xFA) (= op #xFB))
+     (values 1 20))
+    ((<= #x40 op #x5F)
+     (values (if (branch-mispredicted-p op taken) 3 1) 0))
+    ((or (= op #xF8) (= op #x9E) (= op #x9F) (= op #xBE) (= op #xBF))
+     (values 3 0))
+    ((<= #x18 op #x1B)
+     (values 10 0))
+    ((<= #x1C op #x1F)
+     (values 60 0))
+    ((or (= op #x00) (= op #xF9) (= op #xFF))
+     (values 5 0))
+    ((or (= op #x01) (= op #x02) (= op #x03))
+     (values 1 0))
+    ((or (= op #x14) (= op #x15))
+     (values 40 0))
+    ((or (<= #x04 op #x17)
+         (= op #x90) (= op #x91) (= op #xB0) (= op #xB1))
+     (values 4 (if (or (= op #x90) (= op #x91) (= op #xB0) (= op #xB1)) 1 0)))
+    ((and (<= #x80 op #xBF)
+          (not (<= #x98 op #x9F))
+          (not (<= #xB8 op #xBF)))
+     (values 1 1))
+    (t (values 1 0))))
+
+(defun charge (vm op &key taken)
+  "Add the §50 μ and υ of a retired opcode. Does not touch rI or vm-cycles.
+Callers that leave EXECUTE by a signal have not retired and must not call this."
+  (multiple-value-bind (oops mems) (instruction-cost (logand op #xFF) taken)
+    (incf (vm-oops vm) oops)
+    (incf (vm-mem-cost vm) mems))
+  vm)
+
 (defun execute (vm inst)
-  "Execute one instruction. Returns :JUMP, :STOP, or NIL (fall through)."
+  "Execute one instruction. Returns :JUMP, :STOP, or NIL (fall through).
+A normal return charges §50. A signal does not: the instruction did not retire."
   (let ((*exec-vm* vm)
         (*exec-inst* inst)
         (op (inst-op inst)))
-    (cond
+    (let ((effect
+            (cond
       ((= op #x00) (exec-trap vm inst))
       ((<= #x01 op #x17) (exec-float vm inst))
       ((<= #x18 op #x1F) (exec-muldiv vm inst))
@@ -630,6 +679,8 @@ a ropcode above 3, and ropcode 3 on RESUME 0 are illegal."
            :jump
            nil))
       (t (unimplemented (format nil "opcode #x~2,'0X" op))))))
+      (charge vm op :taken (and (<= #x40 op #x5F) (eq effect :jump)))
+      effect)))
 
 (defun step-vm (vm)
   "Fetch–decode–execute one instruction. An execute breakpoint stops first.
@@ -654,7 +705,8 @@ bit appears in rQ."
   ;; An execute breakpoint returned above and did not retire. rI and rU
   ;; advance only after a successful execute, beside this cycle count.
   ;; A fault does not retire. A dynamic trap does not retire the user
-  ;; instruction it diverts. One rI tick is one instruction until plan 08.
+  ;; instruction it diverts. rI stays one tick per retired instruction.
+  ;; §50 υ is charged inside EXECUTE and is not added here.
   (incf (vm-cycles vm))
   (when (deliver-dynamic-trap vm)
     (return-from step-vm vm))

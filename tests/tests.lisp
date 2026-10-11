@@ -1621,6 +1621,129 @@
                    (vm-pc vm))))
          (list nil nil t #x104))
 
+  ;; --- §50 μ and υ ---
+  (check cost-ten-addu
+         (let ((vm (make-vm)))
+           (assemble-into vm
+             '(program (:org 0)
+               (addu $1 $1 $1)
+               (addu $1 $1 $1)
+               (addu $1 $1 $1)
+               (addu $1 $1 $1)
+               (addu $1 $1 $1)
+               (addu $1 $1 $1)
+               (addu $1 $1 $1)
+               (addu $1 $1 $1)
+               (addu $1 $1 $1)
+               (addu $1 $1 $1)
+               (trap 0 0 0)))
+           (dotimes (i 10) (step-vm vm))
+           (let ((dump (with-output-to-string (s)
+                         (dump-registers vm :stream s))))
+             (list (vm-oops vm) (vm-mem-cost vm) (vm-cycles vm) (vm-mems vm)
+                   (and (search "oops=10" dump)
+                        (search "mem-cost=0" dump)
+                        t))))
+         (list 10 0 10 0 t))
+
+  (check cost-taken-bz
+         (let ((vm (make-vm)))
+           (assemble-into vm
+             '(program (:org 0)
+               (label :back)
+               (swym 0)
+               (bz $1 :back)))
+           (set-reg vm 1 0)
+           (setf (vm-pc vm) 4)
+           (let ((op (ldb (byte 8 24) (mem-ref-u32 vm 4))))
+             (step-vm vm)
+             (list op (vm-oops vm) (vm-mem-cost vm) (vm-pc vm) (vm-cycles vm))))
+         (list #x43 3 0 0 1))
+
+  (check cost-taken-pbz
+         (let ((vm (make-vm)))
+           (assemble-into vm
+             '(program (:org 0)
+               (label :back)
+               (swym 0)
+               (pbz $1 :back)))
+           (set-reg vm 1 0)
+           (setf (vm-pc vm) 4)
+           (let ((op (ldb (byte 8 24) (mem-ref-u32 vm 4))))
+             (step-vm vm)
+             (list op (vm-oops vm) (vm-mem-cost vm) (vm-pc vm))))
+         (list #x53 1 0 0))
+
+  (check cost-mul-div
+         (let ((vm (make-vm)))
+           (assemble-into vm
+             '(program (:org 0)
+               (mul $1 $2 $3)
+               (div $1 $2 $3)
+               (trap 0 0 0)))
+           (set-reg vm 2 20)
+           (set-reg vm 3 4)
+           (set-special vm cl-mmix::+r-i+ 10)
+           (step-vm vm)
+           (step-vm vm)
+           (list (vm-oops vm) (vm-mem-cost vm) (vm-cycles vm)
+                 (special-reg vm cl-mmix::+r-i+)
+                 (logand (special-reg vm cl-mmix::+r-q+) #x40)
+                 (reg vm 1)))
+         (list 70 0 2 8 0 5))
+
+  (check cost-ldo
+         (let ((vm (make-vm)))
+           (assemble-into vm '(program (:org 0) (ldo $1 $2 $0) (trap 0 0 0)))
+           (set-reg vm 2 #x200)
+           (mem-set-u64 vm #x200 99)
+           (step-vm vm)
+           (list (vm-oops vm) (vm-mem-cost vm) (vm-mems vm) (vm-cycles vm)
+                 (reg vm 1)))
+         (list 1 1 1 1 99))
+
+  (check cost-go
+         (let ((vm (make-vm)))
+           (assemble-into vm '(program (:org 0) (go $1 $2 $0)))
+           (set-reg vm 2 #x100)
+           (step-vm vm)
+           (list (vm-oops vm) (vm-mem-cost vm) (vm-mems vm) (vm-cycles vm)
+                 (vm-pc vm) (reg vm 1)))
+         (list 3 0 0 1 #x100 4))
+
+  (check cost-cswap
+         (let ((vm (make-vm)))
+           (assemble-into vm '(program (:org 0) (cswap $1 $2 $0) (trap 0 0 0)))
+           (set-reg vm 1 9)
+           (set-reg vm 2 #x200)
+           (set-special vm +r-p+ 5)
+           (mem-set-u64 vm #x200 5)
+           (step-vm vm)
+           (list (vm-oops vm) (vm-mem-cost vm) (vm-mems vm)
+                 (reg vm 1) (mem-ref-u64 vm #x200)))
+         (list 2 2 1 1 9))
+
+  (check cost-demo-sum
+         (multiple-value-bind (sum vm) (demo-sum-1-to-n 10)
+           (list sum (vm-cycles vm) (vm-oops vm) (vm-mem-cost vm)))
+         (list 55 56 62 0))
+
+  (check cost-fault-adds-nothing
+         (let ((vm (make-vm)))
+           (assemble-into vm
+             '(program (:org 0)
+               (seth $1 #x8000)
+               (ldbu $2 $1 $0)
+               (trap 0 0 0)))
+           (step-vm vm)
+           (let ((after-seth (list (vm-oops vm) (vm-cycles vm))))
+             (step-vm vm)
+             (list after-seth
+                   (vm-oops vm) (vm-mem-cost vm) (vm-cycles vm)
+                   (vm-halted vm)
+                   (and (vm-fault vm) t))))
+         (list (list 1 1) 1 0 2 t t))
+
   ;; --- MMIX-SIM traps ---
   (check fopen-refuses-stdio
          (let ((vm (run-forms '((trap 0 1 1)))))

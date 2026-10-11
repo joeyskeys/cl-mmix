@@ -3,7 +3,7 @@
   :description "User-mode MMIX virtual machine for educational MMIXAL programs"
   :author "cl-mmix"
   :license "GPL-3.0"
-  :version "0.12.0"
+  :version "0.13.0"
   :depends-on ()
   :serial t
   :components ((:module "src"

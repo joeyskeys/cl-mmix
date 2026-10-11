@@ -13,6 +13,8 @@
    #:vm-output
    #:vm-error-output
    #:vm-mems
+   #:vm-oops
+   #:vm-mem-cost
    #:vm-fault
    #:vm-exit-code
    #:vm-break

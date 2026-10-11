@@ -61,31 +61,59 @@
          (force-output *error-output*)))
       (t (stream-write-octet (fio-stream fio) byte)))))
 
+(defun fio-text-p (fio)
+  "Modes 0 and 1 are text. The guest newline is #x0A."
+  (member (fio-mode fio) '(0 1)))
+
+(defun fio-input-stream (vm fio)
+  (case (fio-kind fio)
+    (:stdin (ensure-stdin vm fio))
+    (:file (fio-stream fio))
+    (t nil)))
+
+(defun fio-read-guest-byte (vm fio)
+  "One guest byte. Text mode maps the host newline, and CR LF, to #x0A."
+  (let ((s (fio-input-stream vm fio)))
+    (unless s
+      (return-from fio-read-guest-byte nil))
+    (let ((raw (stream-read-octet s)))
+      (cond ((null raw) nil)
+            ((not (fio-text-p fio)) raw)
+            ((or (= raw 10) (= raw 13))
+             (when (and (= raw 13)
+                        (subtypep (stream-element-type s) 'character))
+               (let ((next (stream-read-octet s)))
+                 (when (and next (/= next 10))
+                   (unread-char (code-char next) s))))
+             #x0A)
+            (t raw)))))
+
+(defun fio-write-guest-byte (vm fio byte)
+  "Store one guest byte. Text mode writes #x0A as the host newline."
+  (let ((byte (u8 byte)))
+    (cond ((and (fio-text-p fio)
+                (= byte #x0A)
+                (eq (fio-kind fio) :file)
+                (fio-stream fio))
+           (write-char #\Newline (fio-stream fio)))
+          (t (capture-byte vm fio byte)))
+    byte))
+
 (defun fio-read-into (vm fio addr size)
   "Read up to SIZE bytes. Returns the count actually stored."
   (let ((n 0))
-    (case (fio-kind fio)
-      (:stdin
-       (let ((s (ensure-stdin vm fio)))
-         (loop for i from 0 below size
-               for b = (stream-read-octet s)
-               while b
-               do (mem-set-u8 vm (+ addr i) b :internal t)
-                  (incf n))))
-      (:file
-       (loop for i from 0 below size
-             for b = (stream-read-octet (fio-stream fio))
-             while b
-             do (mem-set-u8 vm (+ addr i) b :internal t)
-                (incf n)))
-      (t nil))
+    (loop for i from 0 below size
+          for b = (fio-read-guest-byte vm fio)
+          while b
+          do (mem-set-u8 vm (+ addr i) b :internal t)
+             (incf n))
     n))
 
 (defun fio-write-from (vm fio addr size)
   (let ((n 0))
     (loop for i from 0 below size
           for b = (mem-ref-u8 vm (+ addr i) :internal t)
-          do (capture-byte vm fio b)
+          do (fio-write-guest-byte vm fio b)
              (incf n))
     n))
 
@@ -116,12 +144,19 @@
        (handler-case
            (let ((stream
                   (ecase mode
-                    ((0 2) (open name :direction :input
-                                 :element-type '(unsigned-byte 8)))
-                    ((1 3) (open name :direction :output
-                                 :element-type '(unsigned-byte 8)
-                                 :if-exists :supersede
-                                 :if-does-not-exist :create))
+                    ;; Text is a character stream so #x0A meets the host newline.
+                    (0 (open name :direction :input
+                             :external-format :latin-1))
+                    (1 (open name :direction :output
+                             :external-format :latin-1
+                             :if-exists :supersede
+                             :if-does-not-exist :create))
+                    (2 (open name :direction :input
+                             :element-type '(unsigned-byte 8)))
+                    (3 (open name :direction :output
+                             :element-type '(unsigned-byte 8)
+                             :if-exists :supersede
+                             :if-does-not-exist :create))
                     (4 (open name :direction :io
                              :element-type '(unsigned-byte 8)
                              :if-exists :supersede
@@ -174,10 +209,7 @@
        (let ((n 0)
              (limit (1- size)))
          (loop for i from 0 below limit
-               for b = (case (fio-kind fio)
-                         (:stdin (stream-read-octet (ensure-stdin vm fio)))
-                         (:file (stream-read-octet (fio-stream fio)))
-                         (t nil))
+               for b = (fio-read-guest-byte vm fio)
                while b
                do (mem-set-u8 vm (+ buf i) b :internal t)
                   (incf n)
@@ -198,7 +230,7 @@
          (loop for i from 0 below #x100000
                for b = (mem-ref-u8 vm (+ addr i) :internal t)
                until (zerop b)
-               do (capture-byte vm fio b)
+               do (fio-write-guest-byte vm fio b)
                   (incf n))
          (ret255 vm n))))))
 
@@ -215,9 +247,9 @@
                for w = (mem-ref-u16 vm (+ addr i) :internal t)
                until (zerop w)
                do (if (<= w 255)
-                      (capture-byte vm fio w)
-                      (progn (capture-byte vm fio (ldb (byte 8 8) w))
-                             (capture-byte vm fio (ldb (byte 8 0) w))))
+                      (fio-write-guest-byte vm fio w)
+                      (progn (fio-write-guest-byte vm fio (ldb (byte 8 8) w))
+                             (fio-write-guest-byte vm fio (ldb (byte 8 0) w))))
                   (incf n))
          (ret255 vm n))))))
 
@@ -231,10 +263,7 @@
       (t
        (let ((n 0))
          (loop for i from 0 below (1- size)
-               for b = (case (fio-kind fio)
-                         (:stdin (stream-read-octet (ensure-stdin vm fio)))
-                         (:file (stream-read-octet (fio-stream fio)))
-                         (t nil))
+               for b = (fio-read-guest-byte vm fio)
                while b
                do (mem-set-u16 vm (+ buf (* 2 i)) b :internal t)
                   (incf n)

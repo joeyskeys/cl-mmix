@@ -1,5 +1,7 @@
 # Plan 10 — Simulator session
 
+Status: implemented. `src/sim.lisp` builds the `:argv` image and reads `sim-command`. Text modes translate newlines in `src/trap.lisp`. `:profile t` counts retired tetras. Pipeline cycles on the `s` line remain plan 11.
+
 Depends on [03](03-save-unsave.md) for the startup `UNSAVE`, on [05](05-kernel-traps.md) so that startup is a real `UNSAVE` under the ROM, and on [08](08-timing-costs.md) for the statistics line. Text-mode newline translation can land before the kernel, behind the same file objects.
 
 Spec: [MMIX-SIM](https://mmix.cs.hm.edu/doc/mmix-sim.pdf) §2–§4, including the interactive command list and the `argc`/`argv` prelude in §18 and §37.

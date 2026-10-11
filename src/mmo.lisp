@@ -262,9 +262,16 @@
       (read-sequence a s)
       a)))
 
-(defun load-mmo (vm source)
-  "Load an .mmo program into VM. SOURCE is a pathname, a filename, or an octet vector."
+(declaim (ftype (function (t t) t) install-argv))
+
+(defun load-mmo (vm source &key argv)
+  "Load an .mmo program into VM. SOURCE is a pathname, a filename, or an octet vector.
+:ARGV, when supplied, builds the Pool_Segment image and enters the user through UNSAVE
+with $0 = argc, $1 = argv, and rL = 2. Omitting it leaves the loader as it was."
   (load-mmo-bytes vm
                   (if (vectorp source)
                       source
-                      (read-binary-file source))))
+                      (read-binary-file source)))
+  (when argv
+    (install-argv vm argv))
+  vm)

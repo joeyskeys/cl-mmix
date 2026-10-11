@@ -1,13 +1,51 @@
 (in-package #:cl-mmix)
 
-(defun dump-registers (vm &key (stream *standard-output*) (nonzero-only t))
+(defun octa-to-double (n)
+  "Binary64 bit pattern N as an SBCL double. Used by the session dump."
+  (let ((hi (ldb (byte 32 32) (u64 n)))
+        (lo (ldb (byte 32 0) (u64 n))))
+    (when (logbitp 31 hi)
+      (decf hi #x100000000))
+    (sb-kernel:make-double-float hi lo)))
+
+(defun double-to-octa (d)
+  "Bits of a Lisp real viewed as binary64."
+  (let* ((d (coerce d 'double-float))
+         (hi (sb-kernel:double-float-high-bits d))
+         (lo (sb-kernel:double-float-low-bits d)))
+    (when (minusp hi)
+      (incf hi #x100000000))
+    (logior (ash (logand hi #xffffffff) 32)
+            (logand lo #xffffffff))))
+
+(defun octa-to-chars (n)
+  "Eight big-endian characters. A non-graphic byte is #\\. "
+  (let ((s (make-string 8))
+        (n (u64 n)))
+    (loop for i from 0 below 8
+          for b = (ldb (byte 8 (* 8 (- 7 i))) n)
+          for c = (code-char b)
+          do (setf (char s i) (if (graphic-char-p c) c #\.)))
+    s))
+
+(defun chars-to-octa (s)
+  "Pack up to eight characters, high byte first."
+  (let ((n 0))
+    (loop for i from 0 below (min 8 (length s))
+          do (setf n (logior n (ash (char-code (char s i)) (* 8 (- 7 i))))))
+    n))
+
+(defun dump-registers (vm &key (stream *standard-output*) (nonzero-only t)
+                            float string)
   (let ((l (reg-l vm))
         (g (reg-g vm)))
     (dotimes (i 256)
       (let ((v (reg vm i)))
         (when (or (not nonzero-only) (not (zerop v)))
-          (format stream "$~D = #x~16,'0X (~D) ~A~%"
+          (format stream "$~D = #x~16,'0X (~D)~@[ ~A~]~@[ ~S~] ~A~%"
                   i v (i64-from-u64 v)
+                  (and string (octa-to-chars v))
+                  (and float (octa-to-double v))
                   (cond ((< i l) "local")
                         ((< i g) "marginal")
                         (t "global"))))))

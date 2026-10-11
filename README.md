@@ -21,13 +21,14 @@ What the code actually does, opcode by opcode, is written in [docs/IMPLEMENTATIO
 - MMIX-SIM `TRAP` services: Halt, Fopen, Fclose, Fread, Fwrite, Fgets, Fgetws, Fputs, Fputws, Fseek, Ftell. Handles 0–2 are StdIn, StdOut, and StdErr.
 - S-expression assembler that emits real forward and backward opcodes, a `.mms` subset (`assemble-mms`, `load-mms`, `write-mmo`), and a `.mmo` loader (content is XOR-ed in, as in MMIXware).
 - Breakpoints on fetch, read, and write. `step-vm`, `run-vm`, `continue-vm`.
+- `load-mmo` `:argv` places `argc` and `argv` in `Pool_Segment` and enters through `UNSAVE`. Text-mode files translate the host newline to `#x0A`. `sim-command` reads one `mmix>` line. `:profile t` counts retired tetras.
 
 ## Layout
 
 ```
 cl-mmix/
   cl-mmix.asd
-  src/          package, util, machine, decode, float/, trap, ops, asm, mmo, mmixal, api
+  src/          package, util, machine, decode, float/, trap, ops, asm, mmo, mmixal, api, sim
   tests/        assert-style tests (no FiveAM), including tests/float.lisp
   scripts/run-demo.lisp
   docs/         implementation guide, full-machine gap analysis, and plans/
@@ -155,7 +156,7 @@ Each `:org` is its own segment. `PC` becomes the first origin, so put code befor
 1H      TRAP    0,Halt,0
 ```
 
-`(load-mmo vm path-or-octet-vector)` loads an `.mmo` file. `PC` is the absolute symbol `Main` or `:Main` when one is present, otherwise the first tetra in the text segment.
+`(load-mmo vm path-or-octet-vector)` loads an `.mmo` file. `PC` is the absolute symbol `Main` or `:Main` when one is present, otherwise the first tetra in the text segment. `:argv` is a list of strings, program name first. It builds the pool image and `UNSAVE`s so `$0` is `argc`, `$1` is `Pool_Segment+8`, and `rL` is 2.
 
 ## Debugger
 
@@ -168,6 +169,8 @@ Each `:org` is its own segment. `PC` becomes the first origin, so put code befor
 (dump-registers vm)                 ; local / marginal / global, rL rG rJ rA rR rH
 (dump-memory vm #x2000000000000000 32)
 (disassemble-at vm)
+(sim-command vm "bx#108")           ; one mmix> line. Empty line steps
+(sim-command vm "s")                ; PC, retired instructions, μ, υ
 ```
 
 `run-vm` signals a Lisp error when `:max-cycles` is exhausted without a halt, a breakpoint, or `SYNC` 4. A `mmix-fault` (kernel address, page budget, unimplemented opcode) is caught by `step-vm`: `vm-fault` holds the reason and the machine halts.
@@ -176,15 +179,15 @@ Each `:org` is its own segment. `PC` becomes the first origin, so put code befor
 
 | Function | Role |
 |----------|------|
-| `make-vm` | `:memory-size` page budget, `:pc`, `:input`, `:legacy-putchar`, `:kernel`, `:virtual-memory`, `:caches`, `:cache-config` |
+| `make-vm` | `:memory-size` page budget, `:pc`, `:input`, `:legacy-putchar`, `:kernel`, `:virtual-memory`, `:caches`, `:cache-config`, `:profile` |
 | `wake-core` | Leave the sleep entered by `SYNC` 4 |
-| `assemble` / `assemble-into` / `load-program` / `load-mmo` | Build and load s-expressions or `.mmo` |
+| `assemble` / `assemble-into` / `load-program` / `load-mmo` | Build and load s-expressions or `.mmo`. `load-mmo` takes `:argv` |
 | `assemble-mms` / `load-mms` / `write-mmo` | Assemble `.mms` text and write `.mmo` |
 | `step-vm` / `run-vm` / `continue-vm` | Execute |
 | `reg` / `set-reg` / `special-reg` / `set-special` | Register window and raw specials |
 | `mem-ref-u*` / `mem-set-u*` | Big-endian memory |
 | `breakpoint` / `clear-breakpoints` | Breakpoints |
-| `disassemble-at` / `dump-registers` / `dump-memory` | Inspect |
+| `disassemble-at` / `dump-registers` / `dump-memory` / `sim-command` | Inspect. `dump-registers` accepts `:float` and `:string` |
 | `demo-sum-1-to-n` / `demo-factorial` / `demo-recursive-factorial` / `demo-putchar-hello` | Demos |
 
 ## Tests
@@ -200,7 +203,7 @@ sbcl --script tests/run-tests.lisp
 - No pipeline. §50 μ and υ are `vm-mem-cost` and `vm-oops`. `vm-cycles` still counts one per `step-vm` that passes an execute breakpoint, and `vm-mems` still counts load and store operations. Dynamic traps and `RESUME 1` run when `make-vm` is called with `:kernel t`. Page tables run with `:virtual-memory t` as well. The default VM still has neither, and bit 63 of an address still faults there. `LDVTS` returns 0 on that default VM.
 - `RESUME 1` (`Z ≠ 0`) on the default VM is still the unimplemented path. `RESUME 0` inserts ropcodes 0–2.
 - `SWYM` does not halt. With caches off, `PRE*`/`SYNCD`/`SYNCID` change nothing and `LDUNC`/`STUNC` are ordinary octa accesses. `:caches t` writebacks dirty lines and records `SYNC` 0–3 as a fence tag. Hit and miss delays are still absent. `SYNC` 6 drops the translation caches when virtual memory is on.
-- `Fopen` text and binary modes are not newline-translated.
+- `s` prints μ and υ. Pipeline cycles are still absent.
 - MMIXAL macros are not implemented. `LOC`, `IS`, `GREG`, `PREFIX`, `LOCAL`, data, expressions, and ordinary instructions assemble from `.mms` text.
 
 ## License

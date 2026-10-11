@@ -1960,6 +1960,153 @@
            (error () t))
          t)
 
+  ;; --- simulator session ---
+  (check argv-unsave
+         (let ((vm (make-vm)))
+           (load-mmo vm (mmo-bytes (mmo-setl-trap-image))
+                     :argv '("prog" "a"))
+           (let* ((argv (reg vm 1))
+                  (p0 (mem-ref-u64 vm argv)))
+             (list (reg vm 0)
+                   argv
+                   (special-reg vm +r-l+)
+                   (coerce (cl-mmix::mem-cstring vm p0) 'string)
+                   (coerce (cl-mmix::mem-cstring vm (mem-ref-u64 vm (+ argv 8))) 'string)
+                   (mem-ref-u64 vm (+ argv 16))
+                   (mem-ref-u64 vm +pool-segment+)
+                   (vm-pc vm))))
+         (list 2 (+ +pool-segment+ 8) 2 "prog" "a" 0
+               (+ +pool-segment+ 48) #x100))
+
+  (check kernel-argv-unsave
+         (let ((vm (make-vm :kernel t)))
+           (load-mmo vm (mmo-bytes (mmo-setl-trap-image))
+                     :argv '("prog" "a"))
+           (let ((loaded (list (reg vm 0)
+                               (reg vm 1)
+                               (special-reg vm +r-l+)
+                               (special-reg vm cl-mmix::+r-q+)
+                               (vm-pc vm))))
+             (step-vm vm)
+             (list loaded (reg vm 3) (vm-pc vm) (vm-halted vm)
+                   (special-reg vm cl-mmix::+r-q+))))
+         (list (list 2 (+ +pool-segment+ 8) 2 0 #x100)
+               42 #x104 nil 0))
+
+  (check text-newline
+         (let ((path "/tmp/cl-mmix-text-nl")
+               (vm (make-vm)))
+           (assemble-into vm
+             '(program (:org #x100)
+               (setl $255 #x300)
+               (trap 0 1 3)
+               (setl $255 #x320)
+               (trap 0 6 3)
+               (trap 0 2 3)
+               (setl $255 #x340)
+               (trap 0 1 3)
+               (setl $255 #x360)
+               (trap 0 3 3)
+               (trap 0 0 0)))
+           (loop for i from 0
+                 for ch across path
+                 do (mem-set-u8 vm (+ #x280 i) (char-code ch)))
+           (mem-set-u8 vm (+ #x280 (length path)) 0)
+           (mem-set-u8 vm #x2A0 65)
+           (mem-set-u8 vm #x2A1 10)
+           (mem-set-u8 vm #x2A2 66)
+           (mem-set-u64 vm #x300 #x280)
+           (mem-set-u64 vm #x308 1)
+           (mem-set-u64 vm #x320 #x2A0)
+           (mem-set-u64 vm #x328 3)
+           (mem-set-u64 vm #x340 #x280)
+           (mem-set-u64 vm #x348 0)
+           (mem-set-u64 vm #x360 #x2C0)
+           (mem-set-u64 vm #x368 3)
+           (run-vm vm)
+           (list (mem-ref-u8 vm #x2C0)
+                 (mem-ref-u8 vm #x2C1)
+                 (mem-ref-u8 vm #x2C2)
+                 (with-open-file (s path :element-type '(unsigned-byte 8))
+                   (list (read-byte s) (read-byte s) (read-byte s)))))
+         (list 65 10 66 (list 65 10 66)))
+
+  (check binary-newline-raw
+         (let* ((path "/tmp/cl-mmix-bin-nl")
+                (raw (progn
+                       (with-open-file (s path :direction :output
+                                          :if-exists :supersede
+                                          :if-does-not-exist :create)
+                         (write-string (format nil "A~%B") s))
+                       (with-open-file (s path :element-type '(unsigned-byte 8))
+                         (let ((a (make-array (file-length s)
+                                              :element-type '(unsigned-byte 8))))
+                           (read-sequence a s)
+                           a))))
+                (vm (make-vm)))
+           (assemble-into vm
+             '(program (:org #x100)
+               (setl $255 #x300)
+               (trap 0 1 3)
+               (setl $255 #x320)
+               (trap 0 3 3)
+               (trap 0 0 0)))
+           (loop for i from 0
+                 for ch across path
+                 do (mem-set-u8 vm (+ #x280 i) (char-code ch)))
+           (mem-set-u8 vm (+ #x280 (length path)) 0)
+           (mem-set-u64 vm #x300 #x280)
+           (mem-set-u64 vm #x308 2)
+           (mem-set-u64 vm #x320 #x2C0)
+           (mem-set-u64 vm #x328 (length raw))
+           (run-vm vm)
+           (let ((guest (make-array (length raw) :element-type '(unsigned-byte 8))))
+             (dotimes (i (length raw))
+               (setf (aref guest i) (mem-ref-u8 vm (+ #x2C0 i))))
+             (equalp guest raw)))
+         t)
+
+  (check sim-break-then-continue
+         (let ((vm (make-vm)))
+           (assemble-into vm
+             '(program (:org #x100)
+               (seth $255 #x2000)
+               (trap 0 7 1)
+               (trap 0 0 0)
+               (:org #x2000000000000000)
+               (:zstring "HELLO")))
+           (sim-command vm "bx#108")
+           (sim-command vm "c")
+           (let ((mid (list (vm-break vm) (vm-halted vm))))
+             (sim-command vm "c")
+             (list mid (vm-halted vm) (vm-break vm))))
+         (list (list (list :exec #x108) nil) t nil))
+
+  (check sim-seth-hex
+         (let ((vm (make-vm)))
+           (assemble-into vm
+             '(program (:org #x100) (seth $255 #x2000) (trap 0 0 0)))
+           (run-vm vm)
+           (sim-command vm "$255#"))
+         "$255=#x2000000000000000
+")
+
+  (check profile-branch-twice
+         (let ((vm (make-vm :profile t)))
+           (assemble-into vm
+             '(program (:org #x100)
+               (setl $1 2)
+               (label :loop)
+               (subi $1 $1 1)
+               (bp $1 :loop)
+               (trap 0 0 0)))
+           (run-vm vm)
+           (let ((report (sim-command vm "q")))
+             (list (gethash #x108 (vm-profile vm))
+                   (and (search "#x108" report) t)
+                   (vm-halted vm))))
+         (list 2 t t))
+
   (run-float-tests)
 
   (format t "~%Results: ~D passed, ~D failed~%" *pass* *fail*)

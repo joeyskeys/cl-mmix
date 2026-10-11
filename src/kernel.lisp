@@ -24,6 +24,10 @@
 (defconstant +rom-base+ #x8000000100000000)
 (defconstant +host-swym-xyz+ #x485354)
 
+(defvar *startup-unsave-offset* 0
+  "Byte offset of UNSAVE $255 in *kernel-rom*. Plan 10 appends that tetra
+after the trap epilogue so a :kernel VM can enter a user with a real UNSAVE.")
+
 (defun kernel-rom-image ()
   (multiple-value-bind (segments origin)
       (assemble '((swym #x485354)
@@ -37,7 +41,14 @@
     (declare (ignore origin))
     (unless (and segments (null (rest segments)))
       (error "kernel ROM assembled into more than one segment"))
-    (cdr (first segments))))
+    (let ((bytes (cdr (first segments))))
+      ;; The trap epilogue stays the first 28 bytes. Startup UNSAVE is next.
+      (unless (= (length bytes) 28)
+        (error "kernel ROM prefix is ~D bytes, expected 28" (length bytes)))
+      (setf *startup-unsave-offset* (length bytes))
+      (concatenate '(vector (unsigned-byte 8))
+                   bytes
+                   #(#xFB #x00 #x00 #xFF)))))
 
 (defparameter *kernel-rom* (kernel-rom-image)
   "Byte vector of the trap ROM. Shared by every kernel VM; nothing writes it.")

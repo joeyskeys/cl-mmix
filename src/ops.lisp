@@ -682,6 +682,21 @@ A normal return charges §50. A signal does not: the instruction did not retire.
       (charge vm op :taken (and (<= #x40 op #x5F) (eq effect :jump)))
       effect)))
 
+(defun note-profile (vm pc)
+  "Count a retired instruction when :PROFILE created the hash."
+  (let ((table (vm-profile vm)))
+    (when (hash-table-p table)
+      (let ((pc (logand (u64 pc) (lognot 3))))
+        (setf (gethash pc table) (1+ (gethash pc table 0))))))
+  vm)
+
+(defun note-sim-fetch (vm)
+  "Print a traced tetra as it is fetched, including inside continue-vm."
+  (let ((pc (logand (vm-pc vm) (lognot 3))))
+    (when (member pc (vm-traces vm) :test #'=)
+      (format *standard-output* "trace #x~X: ~A~%" pc (disassemble-at vm pc))))
+  vm)
+
 (defun step-vm (vm)
   "Fetch–decode–execute one instruction. An execute breakpoint stops first.
 Calling STEP-VM again while stopped executes that instruction.
@@ -718,12 +733,14 @@ bit appears in rQ."
           (when (and (vm-kernel vm) (logbitp 63 retired-pc))
             (raise-program-bit vm +rq-p+))
           (let* ((word (fetch vm))
-                 (inst (decode word))
-                 (effect (execute vm inst)))
-            (unless (or (eq effect :jump) (eq effect :stop) (vm-halted vm))
-              (setf (vm-pc vm) (u64 (+ (vm-pc vm) 4))))
-            (note-usage vm (inst-op inst) retired-pc)
-            (tick-interval vm)
+                 (inst (decode word)))
+            (note-sim-fetch vm)
+            (let ((effect (execute vm inst)))
+              (unless (or (eq effect :jump) (eq effect :stop) (vm-halted vm))
+                (setf (vm-pc vm) (u64 (+ (vm-pc vm) 4))))
+              (note-usage vm (inst-op inst) retired-pc)
+              (tick-interval vm)
+              (note-profile vm retired-pc))
             (when raise-stack
               (raise-program-bit vm +rq-stack-overflow+))))
       (mmix-suppress (c)

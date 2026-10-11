@@ -13,7 +13,7 @@ The gap catalog is [../TAOCP-GAP-ANALYSIS.md](../TAOCP-GAP-ANALYSIS.md). The beh
 | 5 | [04 Machine specials](04-machine-specials.md) | Landed. `rN` frozen, `rI`/`rU` count retired instructions, `rF` records a refused page | Interval delivery through `rTT` is plan 05 |
 | 6 | [09 MMIXAL](09-mmixal.md) | Landed. `assemble-mms`, `load-mms`, and `write-mmo` | argv image is plan 10 |
 | 7 | [05 Kernel traps](05-kernel-traps.md) | Landed. `:kernel t` enters `rT`/`rTT`; default `make-vm` stays on Lisp `exec-trap` | Virtual memory, argv, cross-core `rQ` |
-| 8 | [10 Simulator session](10-simulator-session.md) | Plans 03, 05, and 08 | argv, text newlines, `mmix>` commands, profile |
+| 8 | [10 Simulator session](10-simulator-session.md) | Landed. `:argv` enters through `UNSAVE`, text modes translate newlines, `sim-command` reads one line, `:profile` counts retired tetras | Pipeline cycles on the `s` line are plan 11 |
 | 9 | [06 Virtual memory](06-virtual-memory.md) | Landed. `:virtual-memory t` walks `rV`; default `make-vm` stays an identity map | Line caches landed in plan 07 |
 | 10 | [07 Caches and SYNC](07-cache-and-sync.md) | Landed. `:caches t` writebacks through `SYNCD` and `SYNC`; the default VM still stores straight to memory | Hit and miss delays are plan 11 |
 | 11 | [11 Pipeline](11-pipeline.md) | Plans 01, 02, 03, and 07 | One core with F–D–X–M–W |

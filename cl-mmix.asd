@@ -3,7 +3,7 @@
   :description "User-mode MMIX virtual machine for educational MMIXAL programs"
   :author "cl-mmix"
   :license "GPL-3.0"
-  :version "0.14.0"
+  :version "0.15.0"
   :depends-on ()
   :serial t
   :components ((:module "src"
@@ -28,7 +28,8 @@
                  (:file "translate")
                  (:file "mmo")
                  (:file "mmixal")
-                 (:file "api"))))
+                 (:file "api")
+                 (:file "sim"))))
   :in-order-to ((test-op (test-op "cl-mmix/tests"))))
 
 (defsystem "cl-mmix/tests"

@@ -1,6 +1,6 @@
 # cl-mmix vs a full MMIX machine
 
-This document is the gap between the sources described in [IMPLEMENTATION.md](IMPLEMENTATION.md) (ASDF system `cl-mmix` 0.14.0) and a complete MMIX. It replaces the older write-up, which compared an early MVP (flat registers, about 64 opcodes, a private putchar `TRAP`) with a user-mode practice target. That user-mode target is what the tree implements now. The paragraphs below describe what is still missing after it.
+This document is the gap between the sources described in [IMPLEMENTATION.md](IMPLEMENTATION.md) (ASDF system `cl-mmix` 0.15.0) and a complete MMIX. It replaces the older write-up, which compared an early MVP (flat registers, about 64 opcodes, a private putchar `TRAP`) with a user-mode practice target. That user-mode target is what the tree implements now. The paragraphs below describe what is still missing after it.
 
 The work that closes each gap is a separate plan under [plans/](plans/00-roadmap.md).
 
@@ -18,7 +18,7 @@ Out of scope, and absent from the plans: proposals that change version 1.0.0 (a 
 
 ## Sources
 
-Current behavior: [IMPLEMENTATION.md](IMPLEMENTATION.md), then `src/machine.lisp`, `src/cache.lisp`, `src/decode.lisp`, `src/ops.lisp`, `src/trap.lisp`, `src/kernel.lisp`, `src/translate.lisp`, `src/asm.lisp`, `src/mmo.lisp`, `src/mmixal.lisp`, `src/api.lisp`, `tests/tests.lisp`.
+Current behavior: [IMPLEMENTATION.md](IMPLEMENTATION.md), then `src/machine.lisp`, `src/cache.lisp`, `src/decode.lisp`, `src/ops.lisp`, `src/trap.lisp`, `src/kernel.lisp`, `src/translate.lisp`, `src/asm.lisp`, `src/mmo.lisp`, `src/mmixal.lisp`, `src/api.lisp`, `src/sim.lisp`, `tests/tests.lisp`.
 
 Specification:
 
@@ -31,7 +31,7 @@ Where this file and the code disagree, the code wins for “implemented” and `
 
 ## Baseline already in the tree
 
-These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (153 checks) and must keep `make-vm` usable as a user-mode interpreter.
+These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (160 checks) and must keep `make-vm` usable as a user-mode interpreter.
 
 - All 256 opcode bytes are named in `src/decode.lisp`.
 - Integer arithmetic, shifts, compares, bitwise ops, wyde immediates, conditional sets, branches (including backward and probable forms), `JMP`/`GETA`/`GO`/`PUSHJ`/`PUSHGO`/`POP`, tetra and immediate loads and stores, `LDHT`/`STHT`/`STCO`/`CSWAP`/`MOR`/`MXOR`.
@@ -58,7 +58,7 @@ These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (
 | [07](plans/07-cache-and-sync.md) | Caches and `SYNC` | Implemented behind `:caches`. Default `make-vm` still stores straight to memory. `SYNC` 0–3 records a fence tag | Same caches; hit and miss delays are plan 11 |
 | [08](plans/08-timing-costs.md) | μ and υ | Implemented. `vm-oops` and `vm-mem-cost` follow §50, including mispredicted branches. `vm-cycles`, `vm-mems`, and `rI` keep their old meanings | Pipeline cycle counts are plan 11 |
 | [09](plans/09-mmixal.md) | MMIXAL | Implemented. `.mms` text through `assemble-mms` / `load-mms` / `write-mmo`: `LOC`, `IS`, `GREG`, `PREFIX`, `LOCAL`, data, expressions, local labels, `BSPEC` | The `mmixal` macro language |
-| [10](plans/10-simulator-session.md) | MMIX-SIM session | Library API, raw file bytes, no argv | Text newlines, `argc`/`argv`, interactive commands, profile |
+| [10](plans/10-simulator-session.md) | MMIX-SIM session | Implemented. `:argv` enters through `UNSAVE` with `$0` = argc, `$1` = argv, and `rL` = 2. Text modes translate newlines. `sim-command` reads one line. `:profile t` counts retired tetras | Pipeline cycles on the `s` line are plan 11 |
 | [11](plans/11-pipeline.md) | Pipeline | One instruction retires before the next is fetched | Configurable F–D–X–M–W pipeline, one core, as in MMMIX |
 | [12](plans/12-multicore.md) | Several processors | One `vm` struct | Shared physical memory, atomic `CSWAP`, `SYNC` fences, per-core `rQ` |
 
@@ -82,7 +82,7 @@ The arithmetic is in `src/float/`. Registers hold binary64 patterns, `LDSF`/`STS
 
 Landed as a complete image inside one `step-vm`. `SAVE $X,0` pushes locals as `push-frame` with `X ≥ rG` would, sets `rL ← 0`, pushes `$G`…`$255`, then `rB rD rE rH rJ rM rR rP rW rX rY rZ`, then one octa packing `rG` in the top byte and `rA` in the low tetra. `$X` (a global) receives the address of that top octa. Afterwards `rO = rS`. `POP` faults because the top octa is the header, not a return hole.
 
-`UNSAVE 0,$Z` restores that image from `vm-stack` when `$Z` is the current top, and from memory when the image was moved. A second `UNSAVE` of the same image is not reliable. Both instructions are interruptible in the architecture; the phase counter in `rX` is the plan 05 hook and is not written yet. The official loader starts a process by `UNSAVE` of a fabricated image (MMIX-SIM §37). `load-mmo` still applies `lop_post` directly and sets `PC` from `Main` (plan 10).
+`UNSAVE 0,$Z` restores that image from `vm-stack` when `$Z` is the current top, and from memory when the image was moved. A second `UNSAVE` of the same image is not reliable. Both instructions are interruptible in the architecture; the phase counter in `rX` is the plan 05 hook and is not written yet. The official loader starts a process by `UNSAVE` of a fabricated image (MMIX-SIM §37). `load-mmo` with `:argv` builds that image and `UNSAVE`s it. A load without `:argv` still applies `lop_post` directly and sets `PC` from `Main`.
 
 ### Trips (§35, plan 02)
 
@@ -217,14 +217,14 @@ Accepted: `LOC`, `IS`, `GREG` from 254 downward, `PREFIX`, `LOCAL`, `BYTE`/`WYDE
 
 ### MMIX-SIM session (plan 10)
 
-Still different from `mmix prog.mmo args…` and from the `mmix>` prompt:
+Landed in `src/sim.lisp`, with newline translation in `src/trap.lisp`.
 
-- **Startup image.** `$0` is `argc`. `$1` points at the first argument pointer. The program name is argument 0. Strings and pointers live in `Pool_Segment`. `M[Pool_Segment]` is the first free pool octa. `rL` starts at 2. MMIX-SIM builds this by fabricating a stack and executing `UNSAVE`. `load-mmo` sets `PC` to `Main` and does not build that image.
-- **Text files.** Modes 0 and 1 are C text streams (`"r"` / `"w"`). Newline inside the guest is the byte `#x0A` (wyde `#x000A`). Host text translation happens at the stream boundary. Modes 2–4 are binary. This tree opens every file as `(unsigned-byte 8)` and does not translate.
-- **Interactive commands.** Step (empty line), `c`, `q`, `s`, dump and assign with `!` `.` `#` `"`, `+`, `@`, trace `t`/`u`, breakpoints `b[rwx]`, segment `T`/`D`/`P`/`S`, `B`, `i`, `h`. The Lisp API has `step-vm`, `continue-vm`, three breakpoint kinds, and hex dumps. It has no command reader, no floating or string dump, and no tracepoint separate from a breakpoint.
-- **Profile and the statistics line.** MMIX-SIM can count executions per instruction and print mems and oops. `vm-lines` holds file and line from `lop_line`. Nothing increments a profile. `dump-registers` prints `vm-cycles`, `vm-mems`, `vm-oops`, and `vm-mem-cost`. The interactive statistics command is still plan 10.
+- **Startup image.** `:argv` writes the program name and the arguments into `Pool_Segment`, then `UNSAVE`s a §43 image so `$0` is `argc`, `$1` is `Pool_Segment+8`, and `rL` is 2. `M8[Pool_Segment]` is the first free pool octa. A kernel VM executes the `UNSAVE $255` appended to the ROM and then clears the `p` bit. The default VM calls `unsave-context`. Omitting `:argv` leaves the previous loader.
+- **Text files.** Modes 0 and 1 are character streams. The guest newline is `#x0A` (wyde `#x000A`). A host newline becomes `#x0A` on read, and `#x0A` is written as the host newline. Modes 2–4 stay raw.
+- **Interactive commands.** `sim-command` reads one line: step, `c`, `q`, `s`, examine and assign with `!` `.` `#` `"`, `+`, `@`, trace `t`/`u`, breakpoints `b[rwx]`, segment bases `T`/`D`/`P`/`S`, `B`, `i`, and `h`. A traced tetra is printed when it is fetched, including during `continue-vm`. Marginal registers reject a nonzero assignment. Specials go through `PUT`.
+- **Profile and the statistics line.** `:profile t` adds 1 to a hash keyed by the aligned PC on each retire. `q` prints the nonzero rows, with the `vm-lines` note when one exists. `s` prints `PC`, retired instructions, μ, and υ.
 
-`SWYM` is specified as a no-op whose XYZ fields may signal a debugger. The functional interpreter correctly retires it as a no-op. A debugger hook on `SWYM` belongs to plan 10, not to a change in the opcode’s register effect.
+`SWYM` remains a no-op. Its XYZ fields do not call the command reader.
 
 ## What the plans deliberately leave alone
 

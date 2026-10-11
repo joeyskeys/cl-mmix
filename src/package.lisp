@@ -22,6 +22,8 @@
    #:vm-labels
    #:vm-symbols
    #:vm-legacy-putchar
+   #:vm-profile
+   #:sim-command
    ;; Memory / registers
    #:mem-size
    #:mem-ref-u8 #:mem-set-u8

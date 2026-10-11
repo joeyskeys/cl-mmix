@@ -325,7 +325,7 @@ PC becomes the first origin. Labels are stored on the VM."
     (dolist (seg segments)
       (loop for b across (cdr seg)
             for i from 0
-            do (mem-set-u8 vm (+ (car seg) i) b)))
+            do (mem-set-u8 vm (+ (car seg) i) b :internal t)))
     (setf (vm-pc vm) (u64 org)
           (vm-halted vm) nil
           (vm-cycles vm) 0
@@ -337,7 +337,7 @@ PC becomes the first origin. Labels are stored on the VM."
 (defun load-program (vm bytes &key (origin 0))
   "Load a byte vector into VM at ORIGIN and set PC."
   (loop for i from 0 below (length bytes)
-        do (mem-set-u8 vm (+ origin i) (aref bytes i)))
+        do (mem-set-u8 vm (+ origin i) (aref bytes i) :internal t))
   (setf (vm-pc vm) (u64 origin)
         (vm-halted vm) nil
         (vm-cycles vm) 0)

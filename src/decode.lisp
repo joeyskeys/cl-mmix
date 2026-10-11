@@ -238,14 +238,18 @@
 ;;; Defined in src/kernel.lisp. Returns (values tetra t) on a ROM hit.
 (declaim (ftype (function (t t) (values t t &optional)) rom-tetra))
 
+;;; Defined in src/translate.lisp. Identity read, or an execute translation.
+(declaim (ftype (function (t t) (unsigned-byte 32)) fetch-tetra))
+
 (defun fetch (vm)
   "Fetch the tetrabyte at PC, ignoring the low two bits. Does not advance PC.
-A kernel VM reads its ROM instead of vm-memory when PC is inside that image."
+A kernel VM reads its ROM instead of vm-memory when PC is inside that image.
+With virtual memory on, a nonnegative PC is translated for execute permission."
   (let ((addr (logand (vm-pc vm) (lognot 3))))
     (multiple-value-bind (word hit) (rom-tetra vm addr)
       (if hit
           word
-          (mem-ref-u32 vm addr :internal t)))))
+          (fetch-tetra vm addr)))))
 
 (defun relative-disp (field bits backward)
   (if backward (- field (ash 1 bits)) field))

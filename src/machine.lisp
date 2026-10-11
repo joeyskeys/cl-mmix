@@ -32,9 +32,9 @@
 ;;; rN's low five bytes are seconds since 1970-01-01 UTC.
 (defconstant +unix-epoch+ 2208988800)
 
-;;; rC holds a continuation-page PTE for plan 06. This interpreter stores the
-;;; octa and does not interpret it. PUT rC stays ignored on the user-mode path.
-;;; Once the page size is 2^s, the PTE is: ignored high bits, a physical page
+;;; rC holds a continuation-page PTE. PUT rC stays ignored on the user-mode path.
+;;; With virtual memory on, a register spill into a page without pw writes the
+;;; physical page named here. The PTE is: ignored high bits, a physical page
 ;;; number in a (48−s)-bit field, ignored (s−13) bits, a 10-bit address-space
 ;;; number, and the protection bits pr pw px.
 (defconstant +r-p+  23)
@@ -68,6 +68,11 @@
 (defconstant +rq-p+ (ash #x01 32))
 (defconstant +rq-prog+ (ash #xFF 32))
 
+;;; §45 raises a stack-overflow interrupt after a spill onto the continuation
+;;; page and does not assign it a program bit. This is the leftmost
+;;; high-priority I/O bit of rQ (bit 31).
+(defconstant +rq-stack-overflow+ (ash 1 31))
+
 (defconstant +text-segment+  #x0000000000000000)
 (defconstant +data-segment+  #x2000000000000000)
 (defconstant +pool-segment+  #x4000000000000000)
@@ -92,8 +97,16 @@
   (:report (lambda (c s)
              (format s "MMIX suppress: program bit #x~X" (mmix-suppress-bit c)))))
 
+(define-condition mmix-taken-trap (condition) ()
+  (:report (lambda (c s)
+             (declare (ignore c))
+             (format s "MMIX trap taken"))))
+
 (defvar *exec-vm* nil
   "VM bound by EXECUTE. Illegal fields consult it to choose a halt or the b bit.")
+
+(defvar *exec-inst* nil
+  "Instruction bound by EXECUTE. A fetch translation sees NIL and records SWYM.")
 
 (defun illegal-instruction ()
   "The b condition. User mode halts. A kernel VM records b and suppresses the instruction."
@@ -150,25 +163,42 @@
   (rq-gotten 0 :type (unsigned-byte 64))
   (trans-cache nil)
   (trans-va 0 :type (unsigned-byte 64))
-  (trans-pte 0 :type (unsigned-byte 64)))
+  (trans-pte 0 :type (unsigned-byte 64))
+  (virtual-memory nil :type boolean)
+  (mmio nil)
+  (itc (make-hash-table :test 'eql) :type hash-table)
+  (dtc (make-hash-table :test 'eql) :type hash-table)
+  (stack-alert nil :type boolean))
+
+;;; Defined in src/translate.lisp. Guest loads and stores call them when
+;;; virtual memory is on. A spill asks whether the stack page has pw.
+(declaim (ftype (function (t t (integer 1 8)) (unsigned-byte 64)) guest-load)
+         (ftype (function (t t (integer 1 8) t) t) guest-store)
+         (ftype (function (t t) (values t t &optional)) stack-spill-target))
 
 ;;; Defined in src/kernel.lisp.
 (declaim (ftype (function (t) t) install-kernel))
 
-(defun make-vm (&key (memory-size #x2000000) (pc 0) input legacy-putchar kernel)
+(defun make-vm (&key (memory-size #x2000000) (pc 0) input legacy-putchar kernel
+                   virtual-memory)
   "Create an MMIX VM. Without :KERNEL this is the user-mode interpreter.
 MEMORY-SIZE is the grow-on-touch page budget in bytes (at least one page).
 General registers use the rL/rG window; rG starts at 255 and rL at 0.
 The register stack is rooted at Stack_Segment.
-:KERNEL installs the trap ROM, sets rT and rTT to its entry, and sets rK to all ones."
+:KERNEL installs the trap ROM, sets rT and rTT to its entry, and sets rK to all ones.
+:VIRTUAL-MEMORY requires :KERNEL and translates nonnegative addresses through rV.
+The default leaves the four segments as an identity map, and LDVTS returns 0."
   (unless (and (integerp memory-size) (plusp memory-size))
     (error "memory-size must be a positive integer"))
+  (when (and virtual-memory (not kernel))
+    (error ":virtual-memory requires :kernel t"))
   (let ((vm (%make-vm
              :mem-limit (max memory-size +page-size+)
              :pc (u64 pc)
              :input input
              :legacy-putchar (and legacy-putchar t)
-             :kernel (and kernel t))))
+             :kernel (and kernel t)
+             :virtual-memory (and virtual-memory t))))
     (set-special vm +r-g+ 255)
     (stamp-serial vm)
     (sync-stack vm)
@@ -197,7 +227,10 @@ The register stack is rooted at Stack_Segment.
         (vm-watch-hit vm) nil
         (fill-pointer (vm-output vm)) 0
         (fill-pointer (vm-error-output vm)) 0
-        (fill-pointer (vm-stack vm)) 0)
+        (fill-pointer (vm-stack vm)) 0
+        (vm-stack-alert vm) nil)
+  (clrhash (vm-itc vm))
+  (clrhash (vm-dtc vm))
   (when clear-registers
     (let ((serial (special-reg vm +r-n+)))
       (fill (vm-registers vm) 0)
@@ -330,6 +363,47 @@ that retires; an instruction inserted by RESUME is part of that RESUME."
 (defun raise-program-bit (vm bit)
   (set-special vm +r-q+ (logior (special-reg vm +r-q+) bit)))
 
+(defun %chunk-byte (vm addr &optional (value nil write-p))
+  "One byte of the physical hash. ADDR is below 2^48. A missing read is 0."
+  (multiple-value-bind (page off) (floor addr +page-size+)
+    (let ((arr (ensure-page vm page write-p)))
+      (cond (write-p (setf (aref arr off) (u8 value)))
+            (arr (aref arr off))
+            (t 0)))))
+
+(defun default-mmio (vm addr nbytes value write-p)
+  "Unmapped I/O. A read returns 0, a write is ignored, and rF receives ADDR."
+  (declare (ignore nbytes value write-p))
+  (set-special vm +r-f+ (u64 addr))
+  0)
+
+(defun call-mmio (vm addr nbytes value write-p)
+  (let ((hook (vm-mmio vm)))
+    (if hook
+        (funcall hook vm addr nbytes value write-p)
+        (default-mmio vm addr nbytes value write-p))))
+
+(defun physical-ref (vm addr nbytes)
+  "Read NBYTES at a physical address. Addresses at and above 2^48 are I/O."
+  (let ((addr (logand (u64 addr) #x7fffffffffffffff)))
+    (if (>= addr (ash 1 48))
+        (logand (u64 (call-mmio vm addr nbytes nil nil))
+                (1- (ash 1 (* 8 nbytes))))
+        (let ((acc 0))
+          (dotimes (i nbytes acc)
+            (setf acc (logior (ash acc 8) (%chunk-byte vm (+ addr i)))))))))
+
+(defun physical-set (vm addr nbytes value)
+  "Write NBYTES at a physical address. I/O at and above 2^48 is not stored."
+  (let ((addr (logand (u64 addr) #x7fffffffffffffff))
+        (value (logand (u64 value) (1- (ash 1 (* 8 nbytes))))))
+    (if (>= addr (ash 1 48))
+        (call-mmio vm addr nbytes value t)
+        (loop for i from 0 below nbytes
+              for shift from (* 8 (1- nbytes)) downto 0 by 8
+              do (%chunk-byte vm (+ addr i) (ldb (byte 8 shift) value))))
+    value))
+
 (defun %byte (vm addr &optional (value nil write-p))
   (let ((addr (u64 addr)))
     ;; A nonnegative instruction that names a negative address sets n.
@@ -343,11 +417,27 @@ that retires; an instruction inserted by RESUME is part of that RESUME."
     (let ((addr (if (and (vm-kernel vm) (logbitp 63 addr))
                     (logand addr #x7fffffffffffffff)
                     (user-addr addr))))
-      (multiple-value-bind (page off) (floor addr +page-size+)
-        (let ((arr (ensure-page vm page write-p)))
-          (cond (write-p (setf (aref arr off) (u8 value)))
-                (arr (aref arr off))
-                (t 0)))))))
+      (if write-p
+          (%chunk-byte vm addr value)
+          (%chunk-byte vm addr)))))
+
+(defun %guest-access (vm addr nbytes value write-p internal physical)
+  (cond (physical
+         (if write-p
+             (physical-set vm addr nbytes value)
+             (physical-ref vm addr nbytes)))
+        ((and (vm-virtual-memory vm) (not internal))
+         (if write-p
+             (guest-store vm addr nbytes value)
+             (guest-load vm addr nbytes)))
+        (write-p
+         (if (= nbytes 1)
+             (%byte vm addr value)
+             (%set-sized vm addr nbytes value)))
+        (t
+         (if (= nbytes 1)
+             (%byte vm addr)
+             (%ref-sized vm addr nbytes)))))
 
 (defun note-watch (vm addr kind)
   (dolist (w (vm-watches vm))
@@ -355,14 +445,14 @@ that retires; an instruction inserted by RESUME is part of that RESUME."
       (setf (vm-watch-hit vm) (list kind (u64 addr)))
       (return))))
 
-(defun mem-ref-u8 (vm addr &key internal)
-  (let ((b (%byte vm addr)))
-    (unless internal (note-watch vm addr :read))
+(defun mem-ref-u8 (vm addr &key internal physical)
+  (let ((b (%guest-access vm addr 1 nil nil internal physical)))
+    (unless (or internal physical) (note-watch vm addr :read))
     b))
 
-(defun mem-set-u8 (vm addr value &key internal)
-  (let ((v (%byte vm addr value)))
-    (unless internal (note-watch vm addr :write))
+(defun mem-set-u8 (vm addr value &key internal physical)
+  (let ((v (%guest-access vm addr 1 value t internal physical)))
+    (unless (or internal physical) (note-watch vm addr :write))
     v))
 
 (defun %ref-sized (vm addr nbytes)
@@ -377,34 +467,34 @@ that retires; an instruction inserted by RESUME is part of that RESUME."
           do (%byte vm (+ addr i) (ldb (byte 8 shift) value)))
     value))
 
-(defun mem-ref-u16 (vm addr &key internal)
-  (let ((v (%ref-sized vm addr 2)))
-    (unless internal (note-watch vm addr :read))
+(defun mem-ref-u16 (vm addr &key internal physical)
+  (let ((v (%guest-access vm addr 2 nil nil internal physical)))
+    (unless (or internal physical) (note-watch vm addr :read))
     v))
 
-(defun mem-set-u16 (vm addr value &key internal)
-  (let ((v (%set-sized vm addr 2 value)))
-    (unless internal (note-watch vm addr :write))
+(defun mem-set-u16 (vm addr value &key internal physical)
+  (let ((v (%guest-access vm addr 2 value t internal physical)))
+    (unless (or internal physical) (note-watch vm addr :write))
     v))
 
-(defun mem-ref-u32 (vm addr &key internal)
-  (let ((v (%ref-sized vm addr 4)))
-    (unless internal (note-watch vm addr :read))
+(defun mem-ref-u32 (vm addr &key internal physical)
+  (let ((v (%guest-access vm addr 4 nil nil internal physical)))
+    (unless (or internal physical) (note-watch vm addr :read))
     v))
 
-(defun mem-set-u32 (vm addr value &key internal)
-  (let ((v (%set-sized vm addr 4 value)))
-    (unless internal (note-watch vm addr :write))
+(defun mem-set-u32 (vm addr value &key internal physical)
+  (let ((v (%guest-access vm addr 4 value t internal physical)))
+    (unless (or internal physical) (note-watch vm addr :write))
     v))
 
-(defun mem-ref-u64 (vm addr &key internal)
-  (let ((v (%ref-sized vm addr 8)))
-    (unless internal (note-watch vm addr :read))
+(defun mem-ref-u64 (vm addr &key internal physical)
+  (let ((v (%guest-access vm addr 8 nil nil internal physical)))
+    (unless (or internal physical) (note-watch vm addr :read))
     v))
 
-(defun mem-set-u64 (vm addr value &key internal)
-  (let ((v (%set-sized vm addr 8 value)))
-    (unless internal (note-watch vm addr :write))
+(defun mem-set-u64 (vm addr value &key internal physical)
+  (let ((v (%guest-access vm addr 8 value t internal physical)))
+    (unless (or internal physical) (note-watch vm addr :write))
     v))
 
 (defun mem-xor (vm addr value nbytes)
@@ -486,9 +576,19 @@ that case every bit is recorded. Returns true when a trip is taken."
   vm)
 
 (defun stack-push-octa (vm value)
-  (let ((tau (length (vm-stack vm))))
+  (let* ((tau (length (vm-stack vm)))
+         (addr (+ +stack-segment+ (* 8 tau))))
     (vector-push-extend (u64 value) (vm-stack vm))
-    (mem-set-u64 vm (+ +stack-segment+ (* 8 tau)) value :internal t))
+    ;; The mirror is an identity store so a push does not need a page table.
+    ;; A virtual page without pw is the one case that diverts to rC.
+    (if (vm-virtual-memory vm)
+        (multiple-value-bind (phys divert) (stack-spill-target vm addr)
+          (if divert
+              (progn
+                (physical-set vm phys 8 value)
+                (setf (vm-stack-alert vm) t))
+              (mem-set-u64 vm addr value :internal t)))
+        (mem-set-u64 vm addr value :internal t)))
   value)
 
 (defun widen-locals (vm x)

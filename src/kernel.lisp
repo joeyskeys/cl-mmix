@@ -3,10 +3,10 @@
 ;;; Kernel traps (§36–38). Loaded after the assembler so the ROM is a tetra
 ;;; image. Default make-vm never calls this file's entry points.
 ;;;
-;;; The ROM lives at +ROM-BASE+. Clearing bit 63 yields physical #x100000000,
-;;; which is where plan 06's φ will find it. Until then the fetcher, and only
-;;; the fetcher, reads the image; other negative addresses clear bit 63 and
-;;; use vm-memory.
+;;; The ROM lives at +ROM-BASE+. The fetcher reads that image before translation.
+;;; Clearing bit 63 yields physical #x100000000. Other negative addresses clear
+;;; bit 63 and use physical memory, or the MMIO hook when virtual memory is on
+;;; and the physical address is at least 2^48.
 ;;;
 ;;; The first instruction is SWYM with XYZ #x485354 ("HST"). That is the host
 ;;; call. It runs only when the PC is negative on a kernel VM, so a user SWYM

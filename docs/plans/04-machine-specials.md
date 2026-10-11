@@ -1,6 +1,6 @@
 # Plan 04 — Machine specials
 
-Status: implemented. `stamp-serial`, `tick-interval`, and `note-usage` in `src/machine.lisp`. `step-vm` calls the counters after a retired instruction. `PUT` of these registers stays ignored on the user-mode path. `rQ` bit 6 does not trap until plan 05. `rC` is stored and not interpreted until plan 06.
+Status: implemented. `stamp-serial`, `tick-interval`, and `note-usage` in `src/machine.lisp`. `step-vm` calls the counters after a retired instruction. `PUT` of these registers stays ignored on the user-mode path. `rQ` bit 6 traps through `rTT` when `:kernel t` unmasks it (plan 05). `rC` is consulted when `:virtual-memory t` spills a register stack onto a page without `pw` (plan 06). On the default VM it is stored and not read.
 
 Depends on nothing for the counters and the frozen serial. Raising `rQ` has no effect until plan 05. The continuation page is consulted when plan 06’s protection faults exist; this plan stores `rC` in the architectural format.
 

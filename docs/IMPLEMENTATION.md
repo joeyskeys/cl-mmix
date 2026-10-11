@@ -1,8 +1,8 @@
 # Current implementation
 
-This document describes this tree (ASDF system `cl-mmix`, version 0.10.0). It is what the sources do today. The distance from this tree to a full machine — kernel mode, the remaining opcodes, virtual memory, a pipeline, and shared-memory multi-core — is [TAOCP-GAP-ANALYSIS.md](TAOCP-GAP-ANALYSIS.md). The order of work is [plans/00-roadmap.md](plans/00-roadmap.md).
+This document describes this tree (ASDF system `cl-mmix`, version 0.11.0). It is what the sources do today. The distance from this tree to a full machine — kernel mode, the remaining opcodes, virtual memory, a pipeline, and shared-memory multi-core — is [TAOCP-GAP-ANALYSIS.md](TAOCP-GAP-ANALYSIS.md). The order of work is [plans/00-roadmap.md](plans/00-roadmap.md).
 
-The VM is a **user-mode functional interpreter** for educational MMIXAL. Every one of the 256 opcode bytes has a name in the decoder. The integer, bitwise, floating-point, load/store, branch, wyde, register-stack, `SAVE`/`UNSAVE`, and MMIX-SIM `TRAP` instructions are executed. There is no pipeline and no page-table `rV`. `:kernel t` adds forced traps, dynamic traps, and `RESUME 1`. The default `make-vm` does not.
+The VM is a **user-mode functional interpreter** for educational MMIXAL. Every one of the 256 opcode bytes has a name in the decoder. The integer, bitwise, floating-point, load/store, branch, wyde, register-stack, `SAVE`/`UNSAVE`, and MMIX-SIM `TRAP` instructions are executed. There is no pipeline. `:kernel t` adds forced traps, dynamic traps, and `RESUME 1`. `:virtual-memory t` requires `:kernel` and translates nonnegative addresses through `rV`. The default `make-vm` keeps the four segments as an identity map, faults on bit 63, and returns 0 from `LDVTS`.
 
 ## Source map
 
@@ -19,6 +19,7 @@ ASDF loads `src/` serially, in this order:
 | `ops.lisp` | Instruction execution and `step-vm` / `run-vm` / `continue-vm`. Floating-point opcodes call into `float/` |
 | `asm.lisp` | S-expression assembler |
 | `kernel.lisp` | Trap ROM, forced and dynamic traps, `RESUME 1`. Loaded after the assembler because the ROM is an assembled image |
+| `translate.lisp` | `rV` page-table walk, translation caches, `LDVTS`, and the `vm-mmio` path. Loaded after the kernel so a software miss can force a trap |
 | `mmo.lisp` | `.mmo` loader |
 | `api.lisp` | `dump-registers`, `dump-memory`, and the demos |
 
@@ -68,7 +69,7 @@ Status in the table means what `execute` does today.
 | `#x92`–`#x93` | `LDHT`/`LDHTI` | Executed. The aligned tetra is shifted left by 32. |
 | `#x94`–`#x95` | `CSWAP`/`CSWAPI` | Executed. Compare the octa at the aligned address with `rP`. On a match, store `$X` and set `$X ← 1`. Otherwise set `rP` from memory and `$X ← 0`. |
 | `#x96`–`#x97` | `LDUNC`/`LDUNCI` | Executed as `LDOU`. There is no cache. |
-| `#x98`–`#x99` | `LDVTS`/`LDVTSI` | Executed as "return 0". There are no page tables. |
+| `#x98`–`#x99` | `LDVTS`/`LDVTSI` | On the default VM, `$X ← 0`. With `:virtual-memory t`, a negative PC looks up `$Y+Z` in both translation caches. `$X` becomes 0, 1 (instruction), 2 (data), or 3 (both). The low three bits of the sum replace the cached protection; 0 removes the key. A nonnegative PC sets `k` and the instruction does not retire. |
 | `#x9A`–`#x9D` | `PRELD`/`PRELDI` `PREGO`/`PREGOI` | No-ops. |
 | `#x9E`–`#x9F` | `GO`/`GOI` | Executed. `$X ← PC+4`, then `PC ← ($Y + Z)` with the low two bits cleared. `rJ` is not written. |
 | `#xA0`–`#xAF` | `STB` `STBU` `STW` `STWU` `STT` `STTU` `STO` `STOU` and `I` forms | Executed. A signed store that does not fit the width sets `V` in `rA` and still writes the low bytes. |
@@ -89,9 +90,9 @@ Status in the table means what `execute` does today.
 | `#xF4`–`#xF5` | `GETA`/`GETAB` | Executed. `$X ←` the target address. Control does not branch. |
 | `#xF6`–`#xF7` | `PUT`/`PUTI` | Executed. `PUT` writes `$Z` into special register `X`. `PUTI` writes the unsigned byte `Z`. A nonzero `Y` field is an illegal instruction. See [PUT](#put). |
 | `#xF8` | `POP` | Executed. `X` is the number of return values. `PC ← rJ + 4*YZ`. A `SAVE` header on top of the stack faults as an empty register stack. |
-| `#xF9` | `RESUME` | `Z ≠ 0` faults with "RESUME with a nonzero XYZ is not implemented". A nonzero `X` or `Y` field is an illegal instruction. `RESUME 0` returns to `rW` when `rX` is negative, and otherwise inserts the low tetra of `rX`. See [Trips](#trips). |
+| `#xF9` | `RESUME` | `RESUME 0` returns to `rW` when `rX` is negative, and otherwise inserts the low tetra of `rX`. On the default VM, `Z ≠ 0` reports that it is not implemented. `:kernel t` accepts `RESUME 1` from a negative PC. With `:virtual-memory t`, ropcode 3 inserts the `rZZ` translation into the instruction cache when the trapped opcode is `SWYM`, and into the data cache otherwise. A nonzero `X` or `Y` field is an illegal instruction. See [Trips](#trips). |
 | `#xFA`–`#xFB` | `SAVE`/`UNSAVE` | Executed. See [SAVE and UNSAVE](#save-and-unsave). A nonzero unused field, or a `SAVE` whose `$X` is not global, is an illegal instruction. |
-| `#xFC`–`#xFD` | `SYNC`/`SWYM` | No-ops. `SWYM` does not halt. |
+| `#xFC`–`#xFD` | `SYNC`/`SWYM` | `SWYM` does not halt. On a kernel VM, `SYNC` with XYZ ≥ 4 sets `k` when the PC is nonnegative. XYZ = 6 drops both translation caches. The memory fence itself is plan 07. |
 | `#xFE` | `GET` | Executed. `$X ←` special register `Z`, with no permission check. A nonzero `Y` field is an illegal instruction. |
 | `#xFF` | `TRIP` | Executed. Enters the trip handler at address 0 with the §35 register image. See [Trips](#trips). |
 
@@ -196,14 +197,14 @@ Both instructions finish inside one `step-vm`. An interruptible `SAVE` would rec
 | 5 | `rM` | writable. `MUX` mask |
 | 6 | `rR` | writable. Also written by `DIV`/`DIVU` |
 | 7 | `rBB` | ignored on the user path. A kernel instruction at a negative PC may write it. `TRAP` stores `$255` here |
-| 8 | `rC` | ignored on the user path. A kernel `PUT` from a nonnegative PC sets `k` while `rK`’s `k` bit is set. The octa is a continuation-page PTE for plan 06 and is not interpreted yet |
+| 8 | `rC` | ignored on the user path. A kernel `PUT` from a nonnegative PC sets `k` while `rK`’s `k` bit is set. With `:virtual-memory t`, a register-stack spill into a page without `pw` writes the octa to the physical page named by this PTE (page offset taken from the virtual address) and raises bit 31 of `rQ` after the next instruction that runs |
 | 9 | `rN` | ignored, and frozen. `make-vm` writes it once. The high three bytes are `#x010000` (version 1.0.0). The low five bytes are seconds since 1970-01-01 UTC. `reset-vm` keeps the value, including `:clear-registers` |
 | 10–11 | `rO` `rS` | ignored. Maintained by the VM from the hidden stack and `rL` |
 | 12 | `rI` | ignored by `PUT`. A raw value may be any octa. Each retired instruction subtracts 1 while it is nonzero. The step from 1 to 0 sets bit 6 of `rQ`. One tick is one instruction until plan 08. An execute breakpoint that does not run the instruction does not tick, and a fault does not retire |
 | 13–15 | `rT` `rTT` `rK` | ignored on the user path. `:kernel t` sets `rT` and `rTT` to the ROM (`#x8000000100000000`) and `rK` to all ones. `TRAP` and a dynamic trap clear `rK` |
 | 16 | `rQ` | ignored by `PUT` on the user path. `GET` reads it. Bit 6 is set when `rI` reaches 0. A kernel VM traps through `rTT` when `rQ ∧ rK ≠ 0`. `PUT rQ` there keeps bits that came on since the last `GET rQ` |
 | 17 | `rU` | ignored by `PUT`. `up` is bits 63–56, `um` is bits 55–48, bit 47 counts instructions at a negative `PC` only when it is set, and `uc` is bits 46–0. After a retired instruction whose opcode `op` satisfies `(logand op um) = up`, `uc` increases by 1 modulo 2^47. `up = um = 0` counts every retirement. The fetched opcode is the one that counts; `RESUME` does not also count the instruction it inserts |
-| 18 | `rV` | ignored |
+| 18 | `rV` | ignored on the default VM. `:virtual-memory t` reads `b1 b2 b3 b4 s r n f`. `f = 0` walks the page table in physical memory. `f = 1` forces a trap whose `rXX` high tetra is `#x03000000`. `f > 1`, or an `s` outside 13…48, is a protection failure |
 | 19 | `rG` | clamped to at least 32. Raising it zeros registers that become marginal. Lowering it zeros former marginals that become global and keeps former locals that become global. If the new `rG` is below `rL`, `rL` drops to the new `rG` |
 | 20 | `rL` | only a smaller value (modulo 256) is accepted |
 | 21 | `rA` | bits 18 and above are discarded (`#x3FFFF` mask) |
@@ -233,9 +234,11 @@ Assembler specials accept `rJ`, `J`, or the number `4`. One leading `R` is strip
 | Pool | `#x4000000000000000` |
 | Stack | `#x6000000000000000` |
 
-`vm-memory` is a hash table of 4096-byte pages, keyed by the page number, not a flat vector. A read of a missing page returns 0 and allocates nothing. The first write of a page allocates it, filled with zeros. `(mem-size vm)` is the budget in bytes, which is `:memory-size` rounded up to at least one page (the default budget is `#x2000000`, 32 MiB). Exceeding the budget, or touching an address with bit 63 set on the default VM, signals `mmix-fault`. `step-vm` catches that condition, stores the reason in `vm-fault`, and halts. It does not escape `run-vm` as a raw Lisp error. A kernel VM maps a negative address from a negative PC by clearing bit 63. A nonnegative instruction that uses a negative address sets `n` in `rQ`, a load yields 0, and a store writes nothing.
+`vm-memory` is a hash table of 4096-byte chunks, keyed by the chunk number, not a flat vector. On the default VM that key is the virtual page. With `:virtual-memory t` the same hash is physical memory, and an architectural page of `2^s` may span several chunks. A read of a missing chunk returns 0 and allocates nothing. The first write of a chunk allocates it, filled with zeros. `(mem-size vm)` is the budget in bytes, which is `:memory-size` rounded up to at least one chunk (the default budget is `#x2000000`, 32 MiB). Exceeding the budget, or touching an address with bit 63 set on the default VM, signals `mmix-fault`. `step-vm` catches that condition, stores the reason in `vm-fault`, and halts. It does not escape `run-vm` as a raw Lisp error. A kernel VM maps a negative address from a negative PC by clearing bit 63. A nonnegative instruction that uses a negative address sets `n` in `rQ`, a load yields 0, and a store writes nothing.
 
-`mem-ref-u*` / `mem-set-u*` are big-endian. Multi-byte accesses are done a byte at a time, so a value that crosses a page boundary still works. `:internal t` suppresses watchpoints; fetch and the `.mmo` loader use it.
+With `:virtual-memory t`, a nonnegative address is walked from `rV` (`src/translate.lisp`). Fetch asks for `px`, a load for `pr`, a store for `pw`, and `CSWAP` for both `pr` and `pw`. A missing permission sets `r`, `w`, or `x`. A fetch that lacks `px` does not retire. A physical address at or above `2^48` calls `vm-mmio` (the default reads 0, ignores the write, and stores the address in `rF`) and is not entered in a translation cache. `:internal t` keeps the identity map, so the loader and a spill onto a writable page do not need a page table.
+
+`mem-ref-u*` / `mem-set-u*` are big-endian. Multi-byte accesses are done a byte at a time, so a value that crosses a chunk boundary still works. `:internal t` suppresses watchpoints; fetch and the `.mmo` loader use it. Alignment still clears low bits of the virtual address before translation.
 
 `mem-xor` is the `.mmo` content operation: loading the same tetra twice clears it, which is how fixups patch a field that was emitted as zero.
 
@@ -362,7 +365,7 @@ Symbols are `mmix-symbol` values (`name`, `value`, `kind`, `serial`). Absolute v
 
 `dump-registers` prints non-zero general registers with the class local, marginal, or global, then `PC`, cycles, mems, halt, `rL`, `rG`, `rJ`, `rA`, `rR`, `rH`, then `rN`, `rI`, and `rU` when each is nonzero, and any fault, breakpoint, exit code, or captured output. `dump-memory` prints 16-byte rows and does not clamp the address to the page budget, so a dump of `Data_Segment` works. `disassemble-at` prints a name, registers, and the computed target of a branch, `JMP`, `GETA`, or `PUSHJ`. `PUT` and `GET` print special-register names.
 
-`reset-vm` clears halt, cycles, mems, fault, exit, breakpoints, captured output, and the hidden stack. `:clear-registers` also zeros both register files, restores `rG = 255`, reopens the standard handles, and writes the previous `rN` back. A kernel VM also restores `rT`, `rTT`, and an all-ones `rK`. `:clear-memory` drops the page table. `rO`/`rS` are recomputed.
+`reset-vm` clears halt, cycles, mems, fault, exit, breakpoints, captured output, the hidden stack, the stack-overflow alert, and both translation caches. `:clear-registers` also zeros both register files, restores `rG = 255`, reopens the standard handles, and writes the previous `rN` back. A kernel VM also restores `rT`, `rTT`, and an all-ones `rK`. `:clear-memory` drops the physical chunks. `rO`/`rS` are recomputed.
 
 ## Public API
 
@@ -379,19 +382,19 @@ Exported from `cl-mmix` (see `src/package.lisp`):
 
 `set-special` is a raw write. The `PUT` instruction is the one that applies the restrictions above. `special-reg` is a raw read.
 
-`make-vm` keywords are `:memory-size`, `:pc`, `:input`, `:legacy-putchar`, and `:kernel`.
+`make-vm` keywords are `:memory-size`, `:pc`, `:input`, `:legacy-putchar`, `:kernel`, and `:virtual-memory`. `:virtual-memory t` without `:kernel t` signals an error.
 
 ## What the tests lock down
 
-`sbcl --script tests/run-tests.lisp` runs 109 checks. `tests/tests.lisp` covers decode, big-endian memory, the original sum/factorial/hello demos, the cycle limit, branch opcode bytes (`JMPB` is `#xF1FFFFFF` for a one-instruction backward jump; a forward `BZ` with displacement 2 is `#x42010002`), shift and divide edge cases, `MULU`’s high half, `LDA`/`2ADDU`/`16ADDU`, the register window and `PUT`, conditional sets, alignment and the `V` bit on `STB`, `MOR` byte reversal, `GO` leaving `rJ` alone, `PUSHJ`/`GETA`, recursive factorial, the page budget (including `rF` on the refused page), kernel-address faults, `FADD` of zeros followed by an illegal `SAVE` whose `$X` is not global, `SAVE`/`UNSAVE` (round trip, header, `POP` after `SAVE`, a nonzero `Y`, and a moved image), `TRIP`/`RESUME 0` (including ropcodes 0–2 and a nonzero `Y` on `PUT`), an enabled `V` trip, `rN` (frozen across `PUT` and `reset-vm`), `rI` (countdown, `rQ` bit 6, `GET`, and a breakpoint that does not tick), `rU` (every retirement, and `POP` only), `Fopen` refusing handles 0–2, legacy putchar, `Fgets`/`Fwrite`, breakpoints, a hand-built `.mmo` image (including XOR, `lop_fixo`, a `Main` symbol, and a data-segment location), and `:kernel t` (`Fputs` through the ROM, halt, `PUT rK`, a dynamic trap into `rTT`, `RESUME 1` from a nonnegative PC, a negative address, ropcode 3, and a sticky `PUT rQ`). The default VM’s `Fputs` still leaves `rT` at 0. `tests/float.lisp` covers binary64 arithmetic, signed zero, ties to even, overflow with and without the `O` enable, `FDIV` by zero, `FSQRT` of −1, `FREM`, `FCMPE`/`FEQLE`, `LDSF`/`STSF`, and `FIX` of 2^63.
+`sbcl --script tests/run-tests.lisp` runs 121 checks. `tests/tests.lisp` covers decode, big-endian memory, the original sum/factorial/hello demos, the cycle limit, branch opcode bytes (`JMPB` is `#xF1FFFFFF` for a one-instruction backward jump; a forward `BZ` with displacement 2 is `#x42010002`), shift and divide edge cases, `MULU`’s high half, `LDA`/`2ADDU`/`16ADDU`, the register window and `PUT`, conditional sets, alignment and the `V` bit on `STB`, `MOR` byte reversal, `GO` leaving `rJ` alone, `PUSHJ`/`GETA`, recursive factorial, the page budget (including `rF` on the refused page), kernel-address faults, `FADD` of zeros followed by an illegal `SAVE` whose `$X` is not global, `SAVE`/`UNSAVE` (round trip, header, `POP` after `SAVE`, a nonzero `Y`, and a moved image), `TRIP`/`RESUME 0` (including ropcodes 0–2 and a nonzero `Y` on `PUT`), an enabled `V` trip, `rN` (frozen across `PUT` and `reset-vm`), `rI` (countdown, `rQ` bit 6, `GET`, and a breakpoint that does not tick), `rU` (every retirement, and `POP` only), `Fopen` refusing handles 0–2, legacy putchar, `Fgets`/`Fwrite`, breakpoints, a hand-built `.mmo` image (including XOR, `lop_fixo`, a `Main` symbol, and a data-segment location), and `:kernel t` (`Fputs` through the ROM, halt, `PUT rK`, a dynamic trap into `rTT`, `RESUME 1` from a nonnegative PC, a negative address, ropcode 3, and a sticky `PUT rQ`), and `:virtual-memory t` (a hardware walk, a fetch without `px`, a negative address, software translation through `RESUME 1`, `LDVTS`, `SYNC` 6, `vm-mmio`, an `rC` stack spill, an auxiliary page, and an `n` mismatch). The default VM’s `Fputs` still leaves `rT` at 0. `tests/float.lisp` covers binary64 arithmetic, signed zero, ties to even, overflow with and without the `O` enable, `FDIV` by zero, `FSQRT` of −1, `FREM`, `FCMPE`/`FEQLE`, `LDSF`/`STSF`, and `FIX` of 2^63.
 
 ## What is still not MMIX
 
 The full catalog, including kernel mode and multi-core, is [TAOCP-GAP-ANALYSIS.md](TAOCP-GAP-ANALYSIS.md). The short list:
 
 - `RESUME 1` on the default VM (`Z ≠ 0` still reports that it is not implemented). `RESUME 0` inserts ropcodes 0–2. `SAVE`/`UNSAVE` run to completion in one instruction; the interruptible spill is not recorded in `rX`.
-- Virtual memory: no `rV`, no page tables, `LDVTS` returns 0. On the default VM, bit 63 is a hard fault. `:kernel t` clears bit 63 for a kernel instruction and sets `n` when a user instruction names a negative address. Ropcode 3 stores a page-table pair and does not install it.
-- The default VM does not take dynamic traps. `rI` sets `rQ` bit 6 and stops there until `:kernel t`, which enters `rTT` when `rK` unmasks the bit. `rC` is stored as a PTE octa and not consulted. The ROM services `TRAP`; a dynamic trap enters the same address.
+- Virtual memory stays off on the default VM: the four segments are an identity map, bit 63 is a hard fault, and `LDVTS` returns 0. `:virtual-memory t` (with `:kernel t`) walks `rV`, sets `r`/`w`/`x` on a protection failure, traps when `f = 1`, edits the translation caches from `LDVTS`, drops them on `SYNC` 6, sends physical addresses at or above `2^48` to `vm-mmio`, and spills a register stack that lacks `pw` through `rC`. Line caches and `SYNCD`/`SYNCID` remain plan 07. Without the flag, ropcode 3 stores the page-table pair and leaves the caches empty.
+- The default VM does not take dynamic traps. `rI` sets `rQ` bit 6 and stops there until `:kernel t`, which enters `rTT` when `rK` unmasks the bit. `rC` is consulted only when virtual memory is on. The ROM services `TRAP`; a dynamic trap enters the same address.
 - A pipeline, prediction for `PB*`, and separate υ/μ counts. `vm-cycles` counts instructions. `vm-mems` counts loads and stores.
 - Cache semantics. `LDUNC`, `STUNC`, `PRE*`, `SYNC`, `SYNCD`, and `SYNCID` do not change memory ordering.
 - Newline translation on text-mode `Fopen`.

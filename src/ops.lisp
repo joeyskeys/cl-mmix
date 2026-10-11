@@ -1,5 +1,11 @@
 (in-package #:cl-mmix)
 
+;;; Defined in src/translate.lisp.
+(declaim (ftype (function (t) t) drop-translation-caches)
+         (ftype (function (t t t t) t) install-resumed-translation)
+         (ftype (function (t t) (unsigned-byte 64)) ldvts)
+         (ftype (function (t t t) (values t t &optional)) translate))
+
 (defun y-operand (vm inst)
   "Register $Y, or rY when RESUME ropcode 1 is inserting this instruction."
   (if *yz-override*
@@ -215,9 +221,9 @@
         raw)))
 
 (defun exec-load (vm inst bytes signed)
-  (incf (vm-mems vm))
   (let* ((addr (aligned-addr vm inst (floor (log bytes 2))))
          (raw (read-int vm addr bytes)))
+    (incf (vm-mems vm))
     (set-reg vm (inst-x inst)
              (if (and signed (< bytes 8))
                  (sign-extend-width raw bytes)
@@ -225,7 +231,6 @@
   nil)
 
 (defun exec-store (vm inst bytes signed)
-  (incf (vm-mems vm))
   (let* ((val (reg vm (inst-x inst)))
          (addr (aligned-addr vm inst (floor (log bytes 2))))
          (tripped nil))
@@ -236,6 +241,7 @@
                                   :z val
                                   :inst (inst-raw inst))))
     (write-int vm addr bytes val)
+    (incf (vm-mems vm))
     (maybe-trip tripped)))
 
 (defun exec-go (vm inst)
@@ -254,6 +260,12 @@
   :jump)
 
 (defun exec-cswap (vm inst)
+  (let ((addr (aligned-addr vm inst 3)))
+    (when (and (vm-virtual-memory vm)
+               (not (nth-value 1 (translate vm addr :cswap))))
+      (incf (vm-mems vm))
+      (set-reg vm (inst-x inst) 0)
+      (return-from exec-cswap nil)))
   (incf (vm-mems vm))
   (let* ((addr (aligned-addr vm inst 3))
          (mem (mem-ref-u64 vm addr))
@@ -284,7 +296,14 @@
                        (ash (mem-ref-u32 vm (aligned-addr vm inst 2)) 32))
               nil))
       (#x94 (exec-cswap vm inst))
-      (#x98 (progn (set-reg vm (inst-x inst) 0) nil))
+      (#x98 (progn
+              (cond ((not (vm-virtual-memory vm))
+                     (set-reg vm (inst-x inst) 0))
+                    ((not (logbitp 63 (vm-pc vm)))
+                     (error 'mmix-suppress :bit +rq-k+))
+                    (t
+                     (set-reg vm (inst-x inst) (ldvts vm (eff-addr vm inst)))))
+              nil))
       ((#x9A #x9C) nil)
       (#x9E (exec-go vm inst))
       (#xA0 (exec-store vm inst 1 t))
@@ -413,12 +432,14 @@ Ropcode 3 is the page-table pair, and only RESUME 1 accepts it."
         (1 (exec-inserted vm (logand rx #xffffffff) 1 w-reg y-reg z-reg))
         (2 (exec-resume-set vm rx w-reg y-reg z-reg))
         (3 (if allow-rop3
-               (progn
-                 (setf (vm-trans-cache vm)
-                       (if (= (ldb (byte 8 24) rx) #xFD) :inst :data)
+               (let ((which (if (= (ldb (byte 8 24) rx) #xFD) :inst :data)))
+                 (setf (vm-trans-cache vm) which
                        (vm-trans-va vm) (special-reg vm y-reg)
                        (vm-trans-pte vm) (special-reg vm z-reg)
                        (vm-pc vm) (special-reg vm w-reg))
+                 (install-resumed-translation vm which
+                                              (special-reg vm y-reg)
+                                              (special-reg vm z-reg))
                  :jump)
                (illegal-instruction)))
         (t (illegal-instruction)))))
@@ -472,6 +493,7 @@ a ropcode above 3, and ropcode 3 on RESUME 0 are illegal."
 (defun execute (vm inst)
   "Execute one instruction. Returns :JUMP, :STOP, or NIL (fall through)."
   (let ((*exec-vm* vm)
+        (*exec-inst* inst)
         (op (inst-op inst)))
     (cond
       ((= op #x00) (exec-trap vm inst))
@@ -513,8 +535,15 @@ a ropcode above 3, and ropcode 3 on RESUME 0 are illegal."
        (unsave-context vm (reg vm (inst-z inst)))
        nil)
       ((= op #xFC)
-       (when (and (vm-kernel vm) (>= (inst-xyz inst) 4))
-         (error 'mmix-suppress :bit +rq-k+))
+       (let ((xyz (inst-xyz inst)))
+         ;; XYZ ≥ 4 is privileged from a nonnegative PC. A kernel instruction
+         ;; may execute it. XYZ = 6 drops both translation caches.
+         (when (and (vm-kernel vm)
+                    (>= xyz 4)
+                    (not (logbitp 63 (vm-pc vm))))
+           (error 'mmix-suppress :bit +rq-k+))
+         (when (= xyz 6)
+           (drop-translation-caches vm)))
        nil)
       ((= op #xFD)
        (if (host-swym-p vm inst)
@@ -557,7 +586,9 @@ Calling STEP-VM again while stopped executes that instruction."
   (incf (vm-cycles vm))
   (when (deliver-dynamic-trap vm)
     (return-from step-vm vm))
-  (let ((retired-pc (vm-pc vm)))
+  (let* ((retired-pc (vm-pc vm))
+         (raise-stack (vm-stack-alert vm)))
+    (setf (vm-stack-alert vm) nil)
     (handler-case
         (progn
           (when (and (vm-kernel vm) (logbitp 63 retired-pc))
@@ -568,10 +599,19 @@ Calling STEP-VM again while stopped executes that instruction."
             (unless (or (eq effect :jump) (eq effect :stop) (vm-halted vm))
               (setf (vm-pc vm) (u64 (+ (vm-pc vm) 4))))
             (note-usage vm (inst-op inst) retired-pc)
-            (tick-interval vm)))
+            (tick-interval vm)
+            (when raise-stack
+              (raise-program-bit vm +rq-stack-overflow+))))
       (mmix-suppress (c)
-        (raise-program-bit vm (mmix-suppress-bit c)))
+        (raise-program-bit vm (mmix-suppress-bit c))
+        (when raise-stack
+          (raise-program-bit vm +rq-stack-overflow+)))
+      (mmix-taken-trap ()
+        (when raise-stack
+          (raise-program-bit vm +rq-stack-overflow+)))
       (mmix-fault (e)
+        (when raise-stack
+          (raise-program-bit vm +rq-stack-overflow+))
         (setf (vm-fault vm) (mmix-fault-reason e)
               (vm-halted vm) t))))
   (when (and (vm-watch-hit vm) (not (vm-halted vm)))

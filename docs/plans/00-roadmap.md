@@ -14,7 +14,7 @@ The gap catalog is [../TAOCP-GAP-ANALYSIS.md](../TAOCP-GAP-ANALYSIS.md). The beh
 | 6 | [09 MMIXAL](09-mmixal.md) | Current assembler and `.mmo` loader | `.mms` in process |
 | 7 | [05 Kernel traps](05-kernel-traps.md) | Landed. `:kernel t` enters `rT`/`rTT`; default `make-vm` stays on Lisp `exec-trap` | Virtual memory, argv, cross-core `rQ` |
 | 8 | [10 Simulator session](10-simulator-session.md) | Plans 03, 05, and 08 | argv, text newlines, `mmix>` commands, profile |
-| 9 | [06 Virtual memory](06-virtual-memory.md) | Plan 05 | `rV`, protection faults, `LDVTS`, MMIO |
+| 9 | [06 Virtual memory](06-virtual-memory.md) | Landed. `:virtual-memory t` walks `rV`; default `make-vm` stays an identity map | Line caches and `SYNCD` are plan 07 |
 | 10 | [07 Caches and SYNC](07-cache-and-sync.md) | Plan 06 for negative-address variants; fences can be drafted earlier | One-processor memory order |
 | 11 | [11 Pipeline](11-pipeline.md) | Plans 01, 02, 03, and 07 | One core with F–D–X–M–W |
 | 12 | [12 Multi-core](12-multicore.md) | Plans 05, 06, and 07; plan 11 if each core is pipelined | Shared memory, atomic `CSWAP`, cross-core `SYNC` |

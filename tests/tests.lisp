@@ -1872,6 +1872,94 @@
            (mem-ref-u32 vm #x2000000000000100))
          #xAABBCCDD)
 
+  ;; --- MMIXAL ---
+  (let ((fact (format nil "% factorial~%        LOC     #100~%        SETL    $1,10          % n~%        SETL    $3,1~%1H      BZ      $1,1F~%        MUL     $3,$3,$1~%        SUB     $1,$1,1~%        JMP     1B~%1H      TRAP    0,Halt,0~%")))
+    (check mmixal-factorial
+           (let ((vm (make-vm)))
+             (load-mms vm fact)
+             (run-vm vm)
+             (reg vm 3))
+           3628800)
+    (check mmixal-write-mmo
+           (let ((vm (make-vm)))
+             (load-mmo vm (write-mmo fact))
+             (run-vm vm)
+             (reg vm 3))
+           3628800))
+
+  (check mmixal-greg
+         (let* ((text (format nil "        LOC     Data_Segment~%base    GREG    @~%"))
+                (image (nth-value 3 (assemble-mms text)))
+                (vm (make-vm)))
+           (load-mms vm text)
+           (list (mmixal-image-rg image)
+                 (gethash ":base" (mmixal-image-regs image))
+                 (special-reg vm +r-g+)
+                 (reg vm 254)))
+         (list 254 254 254 #x2000000000000000))
+
+  (check mmixal-local-branches
+         (let* ((text (format nil "        LOC     #100~%1H      JMP     1F~%        SWYM~%1H      JMP     1B~%"))
+                (bytes (cdr (first (assemble-mms text))))
+                (word (lambda (i)
+                        (logior (ash (aref bytes i) 24)
+                                (ash (aref bytes (+ i 1)) 16)
+                                (ash (aref bytes (+ i 2)) 8)
+                                (aref bytes (+ i 3))))))
+           (list (funcall word 0) (funcall word 4) (funcall word 8)))
+         (list #xF0000002 #xFD000000 #xF1FFFFFE))
+
+  (check mmixal-bspec
+         (let* ((text (format nil "        LOC     #100~%        BSPEC   2~%        TETRA   #AABBCCDD~%        ESPEC~%        SETL    $1,7~%        TRAP    0,Halt,0~%"))
+                (image (nth-value 3 (assemble-mms text)))
+                (vm (make-vm)))
+           (load-mms vm text)
+           (run-vm vm)
+           (list (reg vm 1)
+                 (mem-ref-u32 vm #x100)
+                 (mmixal-image-specs image)))
+         (list 7 #xE3010007 '((:mode 2 :tetras (#xAABBCCDD)))))
+
+  (check mmixal-expr
+         (let ((vm (make-vm)))
+           (load-mms vm (format nil "        LOC     #100~%        SETL    $1,(1<<4)|(4>>2)~%        SETL    $2,5%2~%        TRAP    0,Halt,0~%"))
+           (run-vm vm)
+           (list (reg vm 1) (reg vm 2)))
+         (list 17 1))
+
+  (check mmixal-byte-base
+         (let ((vm (make-vm)))
+           (load-mms vm (format nil "        LOC     Data_Segment~%base    GREG    @~%        BYTE    \"Hi\",0~%        LOC     #100~%        LDB     $1,Data_Segment~%        TRAP    0,Halt,0~%"))
+           (run-vm vm)
+           (reg vm 1))
+         72)
+
+  (check mmixal-prefix
+         (let ((vm (make-vm)))
+           (load-mms vm (format nil "        PREFIX  Foo:~%x       IS      7~%        PREFIX  :~%        LOC     #100~%        SETL    $1,Foo:x~%        TRAP    0,Halt,0~%"))
+           (run-vm vm)
+           (reg vm 1))
+         7)
+
+  (check mmixal-main
+         (let ((vm (make-vm)))
+           (load-mmo vm (write-mmo (format nil "        LOC     #100~%        SETL    $1,1~%Main    SETL    $3,42~%        TRAP    0,Halt,0~%")))
+           (run-vm vm)
+           (list (reg vm 1) (reg vm 3)))
+         (list 0 42))
+
+  (check mmixal-local-exceeds-rg
+         (handler-case
+             (assemble-mms (format nil "        LOCAL   $255~%"))
+           (error () t))
+         t)
+
+  (check mmixal-bad-mnemonic
+         (handler-case
+             (assemble-mms (format nil "        LOC     #100~%        ADDI    $1,$2,1~%"))
+           (error () t))
+         t)
+
   (run-float-tests)
 
   (format t "~%Results: ~D passed, ~D failed~%" *pass* *fail*)

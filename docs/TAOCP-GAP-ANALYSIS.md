@@ -1,6 +1,6 @@
 # cl-mmix vs a full MMIX machine
 
-This document is the gap between the sources described in [IMPLEMENTATION.md](IMPLEMENTATION.md) (ASDF system `cl-mmix` 0.13.0) and a complete MMIX. It replaces the older write-up, which compared an early MVP (flat registers, about 64 opcodes, a private putchar `TRAP`) with a user-mode practice target. That user-mode target is what the tree implements now. The paragraphs below describe what is still missing after it.
+This document is the gap between the sources described in [IMPLEMENTATION.md](IMPLEMENTATION.md) (ASDF system `cl-mmix` 0.14.0) and a complete MMIX. It replaces the older write-up, which compared an early MVP (flat registers, about 64 opcodes, a private putchar `TRAP`) with a user-mode practice target. That user-mode target is what the tree implements now. The paragraphs below describe what is still missing after it.
 
 The work that closes each gap is a separate plan under [plans/](plans/00-roadmap.md).
 
@@ -18,7 +18,7 @@ Out of scope, and absent from the plans: proposals that change version 1.0.0 (a 
 
 ## Sources
 
-Current behavior: [IMPLEMENTATION.md](IMPLEMENTATION.md), then `src/machine.lisp`, `src/cache.lisp`, `src/decode.lisp`, `src/ops.lisp`, `src/trap.lisp`, `src/kernel.lisp`, `src/translate.lisp`, `src/asm.lisp`, `src/mmo.lisp`, `src/api.lisp`, `tests/tests.lisp`.
+Current behavior: [IMPLEMENTATION.md](IMPLEMENTATION.md), then `src/machine.lisp`, `src/cache.lisp`, `src/decode.lisp`, `src/ops.lisp`, `src/trap.lisp`, `src/kernel.lisp`, `src/translate.lisp`, `src/asm.lisp`, `src/mmo.lisp`, `src/mmixal.lisp`, `src/api.lisp`, `tests/tests.lisp`.
 
 Specification:
 
@@ -31,7 +31,7 @@ Where this file and the code disagree, the code wins for “implemented” and `
 
 ## Baseline already in the tree
 
-These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (142 checks) and must keep `make-vm` usable as a user-mode interpreter.
+These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (153 checks) and must keep `make-vm` usable as a user-mode interpreter.
 
 - All 256 opcode bytes are named in `src/decode.lisp`.
 - Integer arithmetic, shifts, compares, bitwise ops, wyde immediates, conditional sets, branches (including backward and probable forms), `JMP`/`GETA`/`GO`/`PUSHJ`/`PUSHGO`/`POP`, tetra and immediate loads and stores, `LDHT`/`STHT`/`STCO`/`CSWAP`/`MOR`/`MXOR`.
@@ -41,7 +41,7 @@ These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (
 - `rN`, `rI`, `rU`, and `rF` (plan 04). `rN` is frozen at creation. `rI` and `rU` advance once per retired instruction. A refused page is stored in `rF`. `PUT` of these registers stays ignored. `rQ` bit 6 does not trap yet.
 - Four segments, sparse 4096-byte grow-on-touch chunks, a page budget (`:memory-size`, default `#x2000000`). Those chunks are an allocator granule. They are not architectural pages (`2^s` with `s ≥ 13`).
 - MMIX-SIM `TRAP` services Y = 0…10, intercepted in Lisp. Handles 0–2 are StdIn, StdOut, StdErr. Legacy putchar is opt-in.
-- S-expression assembler, `.mmo` loader, breakpoints, `step-vm` / `run-vm` / `continue-vm`, dumps.
+- S-expression assembler, an MMIXAL subset (`assemble-mms`, `load-mms`, `write-mmo`), `.mmo` loader, breakpoints, `step-vm` / `run-vm` / `continue-vm`, dumps.
 
 `vm-cycles` counts one per `step-vm` that passes an execute breakpoint. `vm-mems` counts loads and stores, including operations §50 leaves out of μ. `vm-oops` and `vm-mem-cost` are the §50 υ and μ totals. That is still not a pipeline.
 
@@ -57,7 +57,7 @@ These are done. The plans must keep `sbcl --script tests/run-tests.lisp` green (
 | [06](plans/06-virtual-memory.md) | `rV` translation | Implemented behind `:virtual-memory` (requires `:kernel`). Default `make-vm` keeps the identity map and `LDVTS` returns 0 | Same walk; line caches landed in plan 07 |
 | [07](plans/07-cache-and-sync.md) | Caches and `SYNC` | Implemented behind `:caches`. Default `make-vm` still stores straight to memory. `SYNC` 0–3 records a fence tag | Same caches; hit and miss delays are plan 11 |
 | [08](plans/08-timing-costs.md) | μ and υ | Implemented. `vm-oops` and `vm-mem-cost` follow §50, including mispredicted branches. `vm-cycles`, `vm-mems`, and `rI` keep their old meanings | Pipeline cycle counts are plan 11 |
-| [09](plans/09-mmixal.md) | MMIXAL | S-expressions only; `.mmo` loads | `.mms` in process: `LOC`, `GREG`, `IS`, local labels, expressions, `PREFIX` |
+| [09](plans/09-mmixal.md) | MMIXAL | Implemented. `.mms` text through `assemble-mms` / `load-mms` / `write-mmo`: `LOC`, `IS`, `GREG`, `PREFIX`, `LOCAL`, data, expressions, local labels, `BSPEC` | The `mmixal` macro language |
 | [10](plans/10-simulator-session.md) | MMIX-SIM session | Library API, raw file bytes, no argv | Text newlines, `argc`/`argv`, interactive commands, profile |
 | [11](plans/11-pipeline.md) | Pipeline | One instruction retires before the next is fetched | Configurable F–D–X–M–W pipeline, one core, as in MMMIX |
 | [12](plans/12-multicore.md) | Several processors | One `vm` struct | Shared physical memory, atomic `CSWAP`, `SYNC` fences, per-core `rQ` |
@@ -211,9 +211,9 @@ The full machine in this repository is still a multiprocessor, with these implem
 
 ### MMIXAL (plan 09)
 
-Students type `.mms`: `LOC`, `IS`, `GREG`, `PREFIX`, `LOCAL`, `BYTE`/`WYDE`/`TETRA`/`OCTA`, strings, expressions, and local labels `1H`/`1B`/`1F` through `9H`. `GREG` allocates globals from 254 downward and the object file’s postamble sets `rG`. `BSPEC`…`ESPEC` brackets special tetras the loader may skip.
+`src/mmixal.lisp` reads `.mms` text. `assemble-mms` returns the same segment list as `assemble`, plus the `GREG` allocation. `load-mms` installs it and sets `rG`. `write-mmo` writes those bytes as `.mmo`. `load-mmo` still loads an object file produced elsewhere.
 
-`src/asm.lisp` assembles s-expressions into the same opcode bytes `mmixal` emits. It has no expression language, no local labels, and no `GREG`. `src/mmo.lisp` loads `mmixal` output: quote, loc, skip, fixups, file, line, spec (skipped), post, stab, end. That split is enough to run a book program that was assembled elsewhere. A full tree also accepts `.mms` directly.
+Accepted: `LOC`, `IS`, `GREG` from 254 downward, `PREFIX`, `LOCAL`, `BYTE`/`WYDE`/`TETRA`/`OCTA`, strings, expressions, and local labels `1H`/`1B`/`1F` through `9H`. `BSPEC`…`ESPEC` tetras stay out of the executable image. The `mmixal` macro language is still absent. `src/asm.lisp` remains the s-expression assembler and is the encoder both paths use.
 
 ### MMIX-SIM session (plan 10)
 

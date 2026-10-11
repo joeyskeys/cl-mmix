@@ -1,6 +1,6 @@
 # Current implementation
 
-This document describes this tree (ASDF system `cl-mmix`, version 0.13.0). It is what the sources do today. The distance from this tree to a full machine — kernel mode, the remaining opcodes, virtual memory, a pipeline, and shared-memory multi-core — is [TAOCP-GAP-ANALYSIS.md](TAOCP-GAP-ANALYSIS.md). The order of work is [plans/00-roadmap.md](plans/00-roadmap.md).
+This document describes this tree (ASDF system `cl-mmix`, version 0.14.0). It is what the sources do today. The distance from this tree to a full machine — kernel mode, the remaining opcodes, virtual memory, a pipeline, and shared-memory multi-core — is [TAOCP-GAP-ANALYSIS.md](TAOCP-GAP-ANALYSIS.md). The order of work is [plans/00-roadmap.md](plans/00-roadmap.md).
 
 The VM is a **user-mode functional interpreter** for educational MMIXAL. Every one of the 256 opcode bytes has a name in the decoder. The integer, bitwise, floating-point, load/store, branch, wyde, register-stack, `SAVE`/`UNSAVE`, and MMIX-SIM `TRAP` instructions are executed. There is no pipeline. `:kernel t` adds forced traps, dynamic traps, and `RESUME 1`. `:virtual-memory t` requires `:kernel` and translates nonnegative addresses through `rV`. `:caches t` adds a write-back instruction cache and data cache. The default `make-vm` keeps the four segments as an identity map, faults on bit 63, returns 0 from `LDVTS`, and writes each store straight into memory.
 
@@ -22,6 +22,7 @@ ASDF loads `src/` serially, in this order:
 | `kernel.lisp` | Trap ROM, forced and dynamic traps, `RESUME 1`. Loaded after the assembler because the ROM is an assembled image |
 | `translate.lisp` | `rV` page-table walk, translation caches, `LDVTS`, and the `vm-mmio` path. Loaded after the kernel so a software miss can force a trap |
 | `mmo.lisp` | `.mmo` loader |
+| `mmixal.lisp` | `.mms` assembler. Shares `encode-form` with `asm.lisp` and can write `.mmo` |
 | `api.lisp` | `dump-registers`, `dump-memory`, and the demos |
 
 `tests/tests.lisp` is a small `check` runner (no FiveAM, no Quicklisp). `scripts/run-demo.lisp` loads the system and prints the demos.
@@ -324,6 +325,21 @@ Any other `Y = 0` halt still stores `$255` as the exit code. `Fputs` of five cha
 
 `assemble-into` writes each segment with `mem-set-u8`, clears halt/cycle/fault state, stores the label table on the VM, and does not clear registers. `load-program` writes one byte vector at one origin.
 
+## MMIXAL
+
+`assemble-mms` reads a `.mms` string or pathname and returns `(values segments origin labels image)`. The instruction bytes come from `encode-form`, so a listing and the s-expression assembler share one encoder. `load-mms` writes the segments, sets `rG` from the `GREG` counter, stores each `GREG` initial value, and copies line notes and symbols. `PC` is `:Main` when that symbol is present, otherwise the first tetra below `Data_Segment`. `write-mmo` emits those same segments as an `.mmo` image that `load-mmo` accepts.
+
+- The prefix starts as `:`. A name that does not begin with `:` is qualified. `PREFIX :` restores `:`.
+- `dH` defines a local label. `dF` and `dB` refer to the next and previous definition. A missing `dB` is address 0. A missing `dF` is an error.
+- `GREG` counts down from 255 and never assigns `$255`. The counter is the new `rG`. A bare `GREG` uses `@`. Two `GREG`s with the same value stay distinct registers.
+- `SET $X,$Y` is `OR`. `SET $X,pure` is one `SETL` and must fit in 16 bits. `LDA` is `ADDU`. The assembler chooses the immediate and backward opcodes. `ADDI` and `JMPB` are rejected in the source.
+- A two-operand memory instruction searches prior `GREG` bases for a displacement under 256. `LDO $X,$Y` is `LDO $X,$Y,0`.
+- `BYTE`, `WYDE`, `TETRA`, and `OCTA` accept integers and strings. Wider data aligns before its label. Instructions align to 4 before the label. `BSPEC`/`ESPEC` tetras are recorded on the image and are not placed at the location counter.
+- `IS`, `LOC`, and `GREG` cannot be future references. `LOCAL` requires `rG` to exceed the named register. `$31` is local implicitly.
+- Diagnostics name the file and line. A bad mnemonic is a Lisp error.
+
+`mmixal-image-rg`, `mmixal-image-regs`, `mmixal-image-values`, and `mmixal-image-specs` expose the allocation. Symbol names in the stab are fully qualified, including the leading colon. `:Main` is serial 1. The `mmixal` macro language is not implemented.
+
 ## `.mmo` loader
 
 `load-mmo` accepts a pathname or an octet vector. The file must start with the escape tetrabyte `#x98` and `lop_pre`. The low byte `Z` of that tetra is how many following tetras belong to the preamble (the usual file is `#x98090101`, so one timestamp tetra is skipped).
@@ -375,7 +391,7 @@ Exported from `cl-mmix` (see `src/package.lisp`):
 - Construction and slots: `vm`, `make-vm`, `vm-memory`, `vm-registers`, `vm-pc`, `vm-halted`, `vm-cycles`, `vm-special`, `vm-output`, `vm-error-output`, `vm-mems`, `vm-oops`, `vm-mem-cost`, `vm-fault`, `vm-exit-code`, `vm-break`, `vm-input`, `vm-labels`, `vm-symbols`, `vm-legacy-putchar`
 - Memory and registers: `mem-size`, `mem-ref-u8` through `mem-set-u64`, `reg`, `set-reg`, `special-reg`, `set-special`, `u64`
 - Execution: `fetch`, `decode`, `step-vm`, `run-vm`, `continue-vm`, `reset-vm`, `breakpoint`, `clear-breakpoints`
-- Loading: `assemble`, `assemble-into`, `load-program`, `load-mmo`
+- Loading: `assemble`, `assemble-into`, `load-program`, `load-mmo`, `assemble-mms`, `load-mms`, `write-mmo`, `mmixal-image`, `mmixal-image-rg`, `mmixal-image-regs`, `mmixal-image-values`, `mmixal-image-specs`
 - Inspection: `disassemble-at`, `dump-registers`, `dump-memory`
 - Demos: `demo-sum-1-to-n`, `demo-factorial`, `demo-recursive-factorial`, `demo-putchar-hello`, `demo-hello`
 - Constants: `+op+`, the four segment bases, and `+r-a+` `+r-b+` `+r-d+` `+r-e+` `+r-g+` `+r-h+` `+r-j+` `+r-l+` `+r-m+` `+r-p+` `+r-r+` `+r-w+` `+r-x+` `+r-y+` `+r-z+`
@@ -387,7 +403,7 @@ Exported from `cl-mmix` (see `src/package.lisp`):
 
 ## What the tests lock down
 
-`sbcl --script tests/run-tests.lisp` runs 142 checks. `tests/tests.lisp` covers decode, big-endian memory, the original sum/factorial/hello demos, the cycle limit, branch opcode bytes (`JMPB` is `#xF1FFFFFF` for a one-instruction backward jump; a forward `BZ` with displacement 2 is `#x42010002`), shift and divide edge cases, `MULU`’s high half, `LDA`/`2ADDU`/`16ADDU`, the register window and `PUT`, conditional sets, alignment and the `V` bit on `STB`, `MOR` byte reversal, `GO` leaving `rJ` alone, `PUSHJ`/`GETA`, recursive factorial, the page budget (including `rF` on the refused page), kernel-address faults, `FADD` of zeros followed by an illegal `SAVE` whose `$X` is not global, `SAVE`/`UNSAVE` (round trip, header, `POP` after `SAVE`, a nonzero `Y`, and a moved image), `TRIP`/`RESUME 0` (including ropcodes 0–2 and a nonzero `Y` on `PUT`), an enabled `V` trip, `rN` (frozen across `PUT` and `reset-vm`), `rI` (countdown, `rQ` bit 6, `GET`, and a breakpoint that does not tick), `rU` (every retirement, and `POP` only), `Fopen` refusing handles 0–2, legacy putchar, `Fgets`/`Fwrite`, breakpoints, a hand-built `.mmo` image (including XOR, `lop_fixo`, a `Main` symbol, and a data-segment location), and `:kernel t` (`Fputs` through the ROM, halt, `PUT rK`, a dynamic trap into `rTT`, `RESUME 1` from a nonnegative PC, a negative address, ropcode 3, and a sticky `PUT rQ`), and `:virtual-memory t` (a hardware walk, a fetch without `px`, a negative address, software translation through `RESUME 1`, `LDVTS`, `SYNC` 6, `vm-mmio`, an `rC` stack spill, an auxiliary page, and an `n` mismatch), and `:caches t` (a dirty line, `SYNC` 5, `LDUNC`, `STUNC`, a data-segment store, `SYNCID` from a nonnegative and a negative address, privileged `SYNC` 7, `SYNC` 8, fence tags, power-save, and `PRELD`), and §50 costs (ten `ADDU`s, a taken backward `BZ` and `PBZ`, `MUL` then `DIV`, `LDO`, `GO`, `CSWAP`, `demo-sum-1-to-n` still returning 55 with its cycle count on `vm-cycles`, and a faulting load that adds no υ or μ). The default VM’s `Fputs` still leaves `rT` at 0. `tests/float.lisp` covers binary64 arithmetic, signed zero, ties to even, overflow with and without the `O` enable, `FDIV` by zero, `FSQRT` of −1, `FREM`, `FCMPE`/`FEQLE`, `LDSF`/`STSF`, and `FIX` of 2^63.
+`sbcl --script tests/run-tests.lisp` runs 153 checks. `tests/tests.lisp` covers decode, big-endian memory, the original sum/factorial/hello demos, the cycle limit, branch opcode bytes (`JMPB` is `#xF1FFFFFF` for a one-instruction backward jump; a forward `BZ` with displacement 2 is `#x42010002`), shift and divide edge cases, `MULU`’s high half, `LDA`/`2ADDU`/`16ADDU`, the register window and `PUT`, conditional sets, alignment and the `V` bit on `STB`, `MOR` byte reversal, `GO` leaving `rJ` alone, `PUSHJ`/`GETA`, recursive factorial, the page budget (including `rF` on the refused page), kernel-address faults, `FADD` of zeros followed by an illegal `SAVE` whose `$X` is not global, `SAVE`/`UNSAVE` (round trip, header, `POP` after `SAVE`, a nonzero `Y`, and a moved image), `TRIP`/`RESUME 0` (including ropcodes 0–2 and a nonzero `Y` on `PUT`), an enabled `V` trip, `rN` (frozen across `PUT` and `reset-vm`), `rI` (countdown, `rQ` bit 6, `GET`, and a breakpoint that does not tick), `rU` (every retirement, and `POP` only), `Fopen` refusing handles 0–2, legacy putchar, `Fgets`/`Fwrite`, breakpoints, a hand-built `.mmo` image (including XOR, `lop_fixo`, a `Main` symbol, and a data-segment location), and `:kernel t` (`Fputs` through the ROM, halt, `PUT rK`, a dynamic trap into `rTT`, `RESUME 1` from a nonnegative PC, a negative address, ropcode 3, and a sticky `PUT rQ`), and `:virtual-memory t` (a hardware walk, a fetch without `px`, a negative address, software translation through `RESUME 1`, `LDVTS`, `SYNC` 6, `vm-mmio`, an `rC` stack spill, an auxiliary page, and an `n` mismatch), and `:caches t` (a dirty line, `SYNC` 5, `LDUNC`, `STUNC`, a data-segment store, `SYNCID` from a nonnegative and a negative address, privileged `SYNC` 7, `SYNC` 8, fence tags, power-save, and `PRELD`), and §50 costs (ten `ADDU`s, a taken backward `BZ` and `PBZ`, `MUL` then `DIV`, `LDO`, `GO`, `CSWAP`, `demo-sum-1-to-n` still returning 55 with its cycle count on `vm-cycles`, and a faulting load that adds no υ or μ), and MMIXAL (a `.mms` factorial of 10 leaving `$3` = 3628800, the same image through `write-mmo` then `load-mmo`, `GREG @` with `rG` = 254, `1F`/`1B` encoded as `#xF0000002` and `#xF1FFFFFE`, a `BSPEC` tetra kept out of the text segment, an expression, a base-relative `LDB`, `PREFIX`, a `:Main` entry, and a rejected `ADDI`). The default VM’s `Fputs` still leaves `rT` at 0. `tests/float.lisp` covers binary64 arithmetic, signed zero, ties to even, overflow with and without the `O` enable, `FDIV` by zero, `FSQRT` of −1, `FREM`, `FCMPE`/`FEQLE`, `LDSF`/`STSF`, and `FIX` of 2^63.
 
 ## What is still not MMIX
 
@@ -399,4 +415,4 @@ The full catalog, including kernel mode and multi-core, is [TAOCP-GAP-ANALYSIS.m
 - A pipeline. `PB*` prediction in this tree is the §50 hand estimate: ordinary branches predict not taken and probable branches predict taken, and `vm-oops` records 1υ or 3υ from that outcome. `vm-cycles` still counts one per `step-vm` that passes an execute breakpoint. `vm-mems` still counts loads and stores. `vm-oops` and `vm-mem-cost` are the §50 totals. Hit and miss delays remain plan 11.
 - Line caches stay off on the default VM, so `LDUNC` is `LDOU`, `STUNC` is `STOU`, and `PRE*`/`SYNCD`/`SYNCID` change nothing. `:caches t` writebacks through `SYNCD` and `SYNC` 5, and `SYNC` 0–3 records a fence tag for a later pipeline. Hit and miss delays are plan 11. A write buffer that drains on its own is still absent.
 - Newline translation on text-mode `Fopen`.
-- An MMIXAL (`.mms`) assembler. The s-expression assembler emits the same opcode bytes; `mmixal` output is consumed by `load-mmo`.
+- The `mmixal` macro language. Listings that stay within `LOC`, `IS`, `GREG`, `PREFIX`, `LOCAL`, data, expressions, and ordinary instructions assemble with `assemble-mms`.

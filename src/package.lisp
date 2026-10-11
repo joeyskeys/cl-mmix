@@ -46,6 +46,14 @@
    #:load-program
    #:assemble-into
    #:load-mmo
+   #:assemble-mms
+   #:load-mms
+   #:write-mmo
+   #:mmixal-image
+   #:mmixal-image-rg
+   #:mmixal-image-regs
+   #:mmixal-image-values
+   #:mmixal-image-specs
    ;; Inspection
    #:disassemble-at
    #:dump-registers

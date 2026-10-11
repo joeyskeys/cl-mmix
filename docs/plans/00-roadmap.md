@@ -11,7 +11,7 @@ The gap catalog is [../TAOCP-GAP-ANALYSIS.md](../TAOCP-GAP-ANALYSIS.md). The beh
 | 3 | [08 Timing costs](08-timing-costs.md) | Landed. `vm-oops` and `vm-mem-cost` follow §50; `vm-cycles` and `vm-mems` keep their old meanings | Pipeline delays are plan 11 |
 | 4 | [03 SAVE and UNSAVE](03-save-unsave.md) | Landed. Full §43 image in one step; interruptible spill is plan 05 | Process images, and the MMIX-SIM startup prelude |
 | 5 | [04 Machine specials](04-machine-specials.md) | Landed. `rN` frozen, `rI`/`rU` count retired instructions, `rF` records a refused page | Interval delivery through `rTT` is plan 05 |
-| 6 | [09 MMIXAL](09-mmixal.md) | Current assembler and `.mmo` loader | `.mms` in process |
+| 6 | [09 MMIXAL](09-mmixal.md) | Landed. `assemble-mms`, `load-mms`, and `write-mmo` | argv image is plan 10 |
 | 7 | [05 Kernel traps](05-kernel-traps.md) | Landed. `:kernel t` enters `rT`/`rTT`; default `make-vm` stays on Lisp `exec-trap` | Virtual memory, argv, cross-core `rQ` |
 | 8 | [10 Simulator session](10-simulator-session.md) | Plans 03, 05, and 08 | argv, text newlines, `mmix>` commands, profile |
 | 9 | [06 Virtual memory](06-virtual-memory.md) | Landed. `:virtual-memory t` walks `rV`; default `make-vm` stays an identity map | Line caches landed in plan 07 |
